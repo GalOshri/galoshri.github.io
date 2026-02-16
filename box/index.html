@@ -2,7 +2,11 @@
 <html lang="en">
 <head>
   <meta charset="UTF-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
+  <meta name="theme-color" content="#c0548e" media="(prefers-color-scheme: light)">
+  <meta name="theme-color" content="#2d1420" media="(prefers-color-scheme: dark)">
+  <meta name="apple-mobile-web-app-capable" content="yes">
+  <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
   <title>Box Breathing</title>
   <style>
     * {
@@ -11,16 +15,21 @@
       box-sizing: border-box;
     }
 
+    html {
+      background: var(--bg-solid);
+    }
+
     body {
       width: 100vw;
-      height: 100vh;
+      min-height: 100vh;
+      min-height: -webkit-fill-available;
       overflow: hidden;
       display: flex;
       align-items: center;
       justify-content: center;
       background: var(--bg);
       font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Helvetica, Arial, sans-serif;
-      transition: background-color 1.5s ease;
+      padding: env(safe-area-inset-top) env(safe-area-inset-right) env(safe-area-inset-bottom) env(safe-area-inset-left);
     }
 
     :root {
@@ -28,6 +37,7 @@
       --square-border: rgba(255, 255, 255, 0.6);
       --orb-gradient: radial-gradient(circle at 50% 50%, #ffb347 0%, #e8856e 35%, #d4688e 65%, transparent 100%);
       --orb-glow-rgb: 255, 160, 80;
+      --bg-solid: #a8608a;
       --bean-fill: white;
       --bean-glow: rgba(255, 255, 255, 0.6);
       --label-color: rgba(255, 255, 255, 0.9);
@@ -35,6 +45,7 @@
 
     :root.night {
       --bg: linear-gradient(135deg, #1a0a0a 0%, #2d1420 30%, #3a1a2e 60%, #1e1028 100%);
+      --bg-solid: #1a0a0a;
       --square-border: rgba(255, 255, 255, 0.6);
       --orb-gradient: radial-gradient(circle at 50% 50%, #c47a30 0%, #8b4530 35%, #5a2838 65%, transparent 100%);
       --orb-glow-rgb: 180, 100, 40;
@@ -45,8 +56,33 @@
 
     .star {
       position: fixed;
+      border-radius: 50%;
+      background: white;
       opacity: 0;
+      box-shadow: 0 0 3px 1px rgba(255, 255, 255, 0.8), 0 0 8px 2px rgba(255, 255, 255, 0.3);
       animation: twinkle-in 1s ease forwards;
+    }
+
+    .star::before, .star::after {
+      content: '';
+      position: absolute;
+      background: rgba(255, 255, 255, 0.6);
+    }
+
+    .star::before {
+      width: 200%;
+      height: 1px;
+      top: 50%;
+      left: -50%;
+      transform: translateY(-50%);
+    }
+
+    .star::after {
+      width: 1px;
+      height: 200%;
+      left: 50%;
+      top: -50%;
+      transform: translateX(-50%);
     }
 
     @keyframes twinkle-in {
@@ -126,8 +162,12 @@
     var glowRgb = '';
     function applyTheme() {
       var h = new Date().getHours();
-      document.documentElement.classList.toggle('night', h >= 20 || h < 6);
+      var isNight = h >= 20 || h < 6;
+      document.documentElement.classList.toggle('night', isNight);
       glowRgb = getComputedStyle(document.documentElement).getPropertyValue('--orb-glow-rgb').trim();
+      document.querySelectorAll('meta[name="theme-color"]').forEach(function(m) {
+        m.setAttribute('content', isNight ? '#1a0a0a' : '#c0548e');
+      });
     }
     applyTheme();
     setInterval(applyTheme, 60000);
@@ -144,33 +184,14 @@
     var lastCycle = Math.floor(Date.now() / CYCLE_MS);
 
     function spawnStar() {
-      var size = 8 + Math.random() * 6;
-      var ns = 'http://www.w3.org/2000/svg';
-      var svg = document.createElementNS(ns, 'svg');
-      svg.setAttribute('viewBox', '0 0 100 100');
-      svg.setAttribute('width', size);
-      svg.setAttribute('height', size);
-      svg.classList.add('star');
-      svg.style.left = (Math.random() * 100) + 'vw';
-      svg.style.top = (Math.random() * 100) + 'vh';
-
-      var defs = document.createElementNS(ns, 'defs');
-      var filter = document.createElementNS(ns, 'filter');
-      filter.id = 'g' + Date.now();
-      var blur = document.createElementNS(ns, 'feGaussianBlur');
-      blur.setAttribute('stdDeviation', '4');
-      filter.appendChild(blur);
-      defs.appendChild(filter);
-      svg.appendChild(defs);
-
-      // 4-point star: narrow diamond spikes with a tiny center
-      var path = document.createElementNS(ns, 'path');
-      path.setAttribute('d', 'M 50,0 L 56,38 100,50 56,62 50,100 44,62 0,50 44,38 Z');
-      path.setAttribute('fill', 'white');
-      path.setAttribute('filter', 'url(#' + filter.id + ')');
-      svg.appendChild(path);
-
-      document.body.appendChild(svg);
+      var star = document.createElement('div');
+      star.className = 'star';
+      var size = 2 + Math.random() * 3;
+      star.style.width = size + 'px';
+      star.style.height = size + 'px';
+      star.style.left = (Math.random() * 100) + 'vw';
+      star.style.top = (Math.random() * 100) + 'vh';
+      document.body.appendChild(star);
     }
 
     function easeInOut(t) {
