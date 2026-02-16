@@ -15,21 +15,23 @@
       box-sizing: border-box;
     }
 
+    html, body {
+      width: 100%;
+      height: 100%;
+    }
+
     html {
-      background: var(--bg-solid);
+      background: var(--bg);
     }
 
     body {
-      width: 100vw;
-      min-height: 100vh;
-      min-height: -webkit-fill-available;
       overflow: hidden;
       display: flex;
       align-items: center;
       justify-content: center;
       background: var(--bg);
       font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Helvetica, Arial, sans-serif;
-      padding: env(safe-area-inset-top) env(safe-area-inset-right) env(safe-area-inset-bottom) env(safe-area-inset-left);
+      padding: env(safe-area-inset-top, 0px) env(safe-area-inset-right, 0px) env(safe-area-inset-bottom, 0px) env(safe-area-inset-left, 0px);
     }
 
     :root {
@@ -230,7 +232,7 @@
       var rotation = [0, 90, 180, 270][sideIndex];
       dot.style.left = (x * 100) + '%';
       dot.style.top = (y * 100) + '%';
-      dot.style.transform = 'rotate(' + rotation + 'deg) scaleY(-1)';
+      dot.style.transform = 'rotate(' + rotation + 'deg) translateY(2px) scaleY(-1)';
 
       // Orb scale: 0.5 (small) ↔ 1.0 (large)
       let scale;
