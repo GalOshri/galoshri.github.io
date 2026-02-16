@@ -21,7 +21,8 @@
     }
 
     html {
-      background: var(--bg);
+      background-color: var(--bg-solid);
+      background-image: var(--bg);
     }
 
     body {
@@ -29,8 +30,11 @@
       display: flex;
       align-items: center;
       justify-content: center;
-      background: var(--bg);
+      background-color: var(--bg-solid);
+      background-image: var(--bg);
       font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Helvetica, Arial, sans-serif;
+      min-height: 100vh;
+      min-height: 100dvh;
       padding: env(safe-area-inset-top, 0px) env(safe-area-inset-right, 0px) env(safe-area-inset-bottom, 0px) env(safe-area-inset-left, 0px);
     }
 
