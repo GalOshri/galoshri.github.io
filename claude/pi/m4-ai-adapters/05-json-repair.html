@@ -1,0 +1,151 @@
+<!doctype html>
+<html lang="en">
+<head>
+	<meta charset="utf-8">
+	<meta name="viewport" content="width=device-width, initial-scale=1">
+	<title>Repairing broken JSON · pi · Codebase Academy</title>
+	<link rel="stylesheet" href="../assets/css/site.css">
+</head>
+<body>
+	<article class="lesson">
+		<h1>Repairing broken JSON</h1>
+		<p class="lede">
+			You met <code>json-parse.ts</code> in lesson 1.3 as a syntax specimen.
+			Now you know enough to appreciate what it's <em>for</em>: language models
+			produce structured output the way toddlers produce sentences —
+			usually right, never guaranteed. pi plans for that.
+		</p>
+
+		<h2>The three ways model JSON goes wrong</h2>
+		<p>Tool-call arguments are JSON <em>written by a text generator</em>, and they fail in three characteristic ways:</p>
+		<ul>
+			<li>
+				<strong>Truncation.</strong> During streaming, arguments arrive in
+				fragments — <code>'{"pa'</code> is the steady state, not an anomaly
+				(lesson 3.4's event trace). And when a response hits its token limit
+				(<code>stopReason: "length"</code>), even the <em>final</em> JSON can
+				be cut off mid-string.
+			</li>
+			<li>
+				<strong>Raw control characters.</strong> A model writing a file via a
+				tool happily puts real newlines inside a JSON string — where the spec
+				demands <code>\n</code>. Strict parsers reject the whole call.
+			</li>
+			<li>
+				<strong>Invalid escapes.</strong> Regex-heavy arguments produce
+				<code>"\d+"</code> — and <code>\d</code> is not a legal JSON escape.
+				One backslash, entire tool call rejected.
+			</li>
+		</ul>
+
+		<aside class="concept" data-kind="llm">
+			<p class="concept-label">LLM · Why model output is unreliable structured data</p>
+			<p>
+				A model emits tokens by sampling a probability distribution — nothing
+				<em>mechanically</em> constrains token 47 to close the brace opened
+				by token 12. Providers improve the odds (fine-tuning on tool calls;
+				some offer constrained decoding — that's the <code>strict</code> flag
+				from the compat lesson), but the client can't count on it, and with
+				twenty vendors of varying quality, "usually valid" is the ceiling.
+			</p>
+			<p>
+				So robust agents treat model output like user input: <strong>parse
+				defensively, repair when possible, validate against a schema, and
+				let failures flow back as data</strong>. pi does all four — repair
+				here, schema validation in the loop (lesson 2.5), and a
+				<code>isError: true</code> tool result if it's still hopeless, so the
+				model gets to try again. Nothing crashes because the model typo'd.
+			</p>
+		</aside>
+
+		<h2>Repair: a one-pass state machine</h2>
+		<p>You've seen the skeleton; now read it as an engineer. The full function walks the string once, tracking one bit of state — <em>am I inside a string literal?</em> — and fixes problems as they pass:</p>
+		<figure class="code">
+			<figcaption><span>packages/ai/src/utils/json-parse.ts</span><span class="lines">repairJson core, abridged</span></figcaption>
+			<pre><code class="language-typescript">export function repairJson(json: string): string {
+	let repaired = "";
+	let inString = false;
+
+	for (let index = 0; index &lt; json.length; index++) {
+		const char = json[index];
+
+		if (!inString) {
+			repaired += char;
+			if (char === '"') inString = true;
+			continue;
+		}
+
+		if (char === "\\") {
+			const nextChar = json[index + 1];
+			if (VALID_JSON_ESCAPES.has(nextChar)) {
+				repaired += `\\${nextChar}`;   // legal escape: keep it
+				index += 1;
+			} else {
+				repaired += "\\\\";            // illegal escape like \d: double the backslash
+			}
+			continue;
+		}
+
+		repaired += isControlCharacter(char) ? escapeControlCharacter(char) : char;
+	}
+	return repaired;
+}</code></pre>
+		</figure>
+		<p>
+			Outside strings, characters pass through untouched (structural JSON is
+			rarely what breaks). Inside strings: illegal escapes get their backslash
+			doubled (<code>\d</code> → <code>\\d</code>, preserving the model's
+			plain intent), and raw control characters get properly escaped (a real
+			newline → <code>\n</code>). Minimal intervention — the repair changes
+			the <em>encoding</em>, never the content.
+		</p>
+
+		<h2>The escalation ladder</h2>
+		<p>The file's exports form a strategy, cheapest first:</p>
+		<figure class="diagram">
+			<div class="drow">
+				<div class="dbox"><span class="dbox-title">JSON.parse</span><span class="dbox-sub">1. try the strict parser</span></div>
+				<span class="darrow">→ <span class="dlabel">on failure</span></span>
+				<div class="dbox"><span class="dbox-title">repairJson + parse</span><span class="dbox-sub">2. fix escapes &amp; control chars, retry</span></div>
+				<span class="darrow">→ <span class="dlabel">still streaming?</span></span>
+				<div class="dbox"><span class="dbox-title">parseStreamingJson</span><span class="dbox-sub">3. tolerant partial parse</span></div>
+			</div>
+			<figcaption class="dcaption">parseJsonWithRepair = steps 1–2. parseStreamingJson adds the partial-json library for incomplete fragments.</figcaption>
+		</figure>
+		<p>
+			<code>parseStreamingJson</code> is the one you've already watched at
+			work: after each <code>input_json_delta</code>, the Anthropic adapter
+			re-parses the accumulated fragment so <code>'{"path": "packa'</code>
+			yields <code>{ path: "packa" }</code> — good enough for the UI to render
+			a forming tool call. It leans on <code>partial-json</code>, one of
+			<code>pi-ai</code>'s very few external dependencies (pinned, of course).
+			Sensible make-vs-buy: repair heuristics are pi's accumulated knowledge —
+			hand-written; partial parsing is a solved general problem — bought.
+		</p>
+
+		<div class="callout note">
+			<span class="callout-label">Note · the trust gradient</span>
+			<p>
+				Assemble the module's worldview: provider <em>protocol</em> events get
+				<code>parseJsonWithRepair</code> (mostly trusted, lesson 4.2); model
+				<em>output</em> gets the full ladder plus schema validation (never
+				trusted); and your own session files get plain <code>JSON.parse</code>
+				(pi wrote them itself). Matching paranoia to provenance is a
+				transferable habit — and cheaper than maximal paranoia everywhere.
+			</p>
+		</div>
+
+		<h2>What you now know</h2>
+		<p>
+			Model JSON breaks in three ways; pi answers with an escalation ladder —
+			strict, repaired, partial — plus schema validation and errors-as-data
+			above it. Next: the money lesson. How prompt caching turns an agent's
+			worst cost problem into a 90% discount, and how every penny is
+			accounted.
+		</p>
+	</article>
+	<script src="../manifest.js"></script>
+	<script src="../assets/vendor/highlight.min.js"></script>
+	<script src="../assets/js/app.js" defer></script>
+</body>
+</html>

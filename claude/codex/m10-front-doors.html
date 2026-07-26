@@ -1,0 +1,392 @@
+<!doctype html>
+<html lang="en">
+<head>
+	<meta charset="utf-8">
+	<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+	<meta name="color-scheme" content="light dark">
+	<title>The Other Front Doors · Codex Explainer</title>
+	<link rel="stylesheet" href="assets/css/site.css">
+</head>
+<body>
+	<article class="lesson" data-module="m10-front-doors.html">
+		<h1>The Other Front Doors</h1>
+		<p class="lede">
+			Module&nbsp;9 covered the front door with a human behind it. This module covers
+			everything else that drives the same agent: shell scripts, IDE extensions, the
+			desktop app, other AI tools, two SDKs, and the cloud. The recurring idea is that
+			none of them is a special case.
+		</p>
+
+		<section class="lesson-section" id="exec" data-minutes="8">
+			<h2>codex exec: the non-interactive mode</h2>
+
+			<p>
+				<code>codex exec "fix the failing test"</code> runs a turn with nobody watching:
+				no TUI, no approval prompts, output to stdout, exit code that means something.
+				It is the mode you put in CI.
+			</p>
+
+			<p>
+				Module&nbsp;3 read its loop. The point worth returning to is what it
+				<em>doesn't</em> do differently:
+			</p>
+
+			<figure class="code">
+				<figcaption><span>codex-rs/exec/src/lib.rs</span><span class="lines">the client loop, abridged</span></figcaption>
+				<pre><code class="language-rust">match server_event {
+    InProcessServerEvent::ServerRequest(request) =&gt; {
+        handle_server_request(&amp;client, request, &amp;mut error_seen).await;
+    }
+    InProcessServerEvent::ServerNotification(mut notification) =&gt; {
+        match event_processor.process_server_notification(notification) {
+            CodexStatus::Running =&gt; {}
+            CodexStatus::InitiateShutdown =&gt; break,
+        }
+    }
+}</code></pre>
+			</figure>
+
+			<p>
+				Same <code>InProcessServerEvent</code>, same app-server protocol as the TUI.
+				The difference is entirely in the <code>event_processor</code>, and there are two
+				of them:
+				<code class="path">codex-rs/exec/src/event_processor_with_human_output.rs</code>
+				and
+				<code class="path">codex-rs/exec/src/event_processor_with_jsonl_output.rs</code>.
+			</p>
+
+			<p>
+				One prints prose for a person reading a CI log; the other prints one JSON object
+				per line for a program. Same events, two renderings — which is exactly the
+				separation that made <code>into_response</code> and <code>code_mode_result</code>
+				coexist in Module&nbsp;7.
+			</p>
+
+			<aside class="concept" data-kind="eng">
+				<p class="concept-label">Engineering · JSONL as a machine interface</p>
+				<p>
+					JSON Lines — one complete JSON value per line — is the standard shape for
+					streaming structured output from a CLI. It is greppable, it can be consumed
+					incrementally without a streaming parser, and a truncated stream still yields
+					every complete record before the cut. If you want to script Codex, this is
+					the surface to target, and Module&nbsp;4's <code>EventMsg</code> is its
+					vocabulary.
+				</p>
+			</aside>
+
+			<p>
+				Notice <code>error_seen</code> being threaded through both branches in that
+				loop. Getting the exit code right is most of what separates a tool you can put
+				in CI from one you cannot, and Module&nbsp;4's distinction between
+				<code>Interrupted</code> and <code>Failed</code> is what makes it possible.
+			</p>
+		</section>
+
+		<section class="lesson-section" id="app-server" data-minutes="9">
+			<h2>app-server: the JSON-RPC daemon</h2>
+
+			<p>
+				This is the crate everything else routes through — 44,000 lines, with 29,000
+				more in its protocol crate. Modules 1 and 3 established the surprise: the TUI
+				and <code>exec</code> are already clients of it, in-process.
+			</p>
+
+			<p>The very first lines of the crate tell you what kind of program it is:</p>
+
+			<figure class="code">
+				<figcaption><span>codex-rs/app-server/src/lib.rs</span><span class="lines">lines 1–2</span></figcaption>
+				<pre><code class="language-rust">#![recursion_limit = "256"]
+#![deny(clippy::print_stdout, clippy::print_stderr)]</code></pre>
+			</figure>
+
+			<aside class="concept" data-kind="rust">
+				<p class="concept-label">Rust · Crate-level attributes</p>
+				<p>
+					<code>#![...]</code> with the exclamation mark applies to the enclosing item
+					— here, the whole crate — rather than the item below it.
+					<code>deny(clippy::print_stdout)</code> makes any <code>println!</code>
+					anywhere in these 44,000 lines a compile error.
+				</p>
+			</aside>
+
+			<p>
+				That is not stylistic. When the app-server runs as a subprocess, <strong>stdout
+				is the protocol channel</strong>. A stray <code>println!("here")</code> left in
+				during debugging would inject garbage into the JSON-RPC stream and break the IDE
+				extension in a way that is maddening to diagnose. So the compiler forbids it,
+				and logging goes to a file or to stderr through <code>tracing</code>.
+			</p>
+
+			<p>
+				There is a family of crates around it, and the split tells you the shape of the
+				problem:
+			</p>
+
+			<div class="table-wrap">
+				<table>
+					<thead>
+						<tr><th>Crate</th><th>Role</th></tr>
+					</thead>
+					<tbody>
+						<tr><td><code>app-server</code></td><td>The server: holds threads, translates requests into <code>Op</code>s</td></tr>
+						<tr><td><code>app-server-protocol</code></td><td>The types (Module&nbsp;4's macro table)</td></tr>
+						<tr><td><code>app-server-client</code></td><td>The client half — <code>InProcess</code> or <code>Remote</code></td></tr>
+						<tr><td><code>app-server-transport</code></td><td>Framing over stdio, sockets, or a Unix domain socket</td></tr>
+						<tr><td><code>app-server-daemon</code></td><td>Lifecycle: start, stop, discover a running server</td></tr>
+						<tr><td><code>app-server-test-client</code></td><td>A test harness that drives a real server</td></tr>
+					</tbody>
+				</table>
+			</div>
+
+			<p>
+				Transport is a separate crate because the same protocol runs over stdio (IDE
+				extension spawning a subprocess), a Unix domain socket (the desktop app talking
+				to a shared daemon), and in-process channels. Hence
+				<code class="path">codex-rs/uds</code> and
+				<code class="path">codex-rs/stdio-to-uds</code> — the latter being the hidden
+				subcommand from Module&nbsp;1, a shim for clients that can only speak stdio when
+				the server is on a socket.
+			</p>
+
+			<aside class="concept" data-kind="eng">
+				<p class="concept-label">Engineering · Dogfooding the boundary</p>
+				<p>
+					The decision to make the TUI a client of app-server rather than calling
+					<code>core</code> directly costs a serialisation boundary and a layer of
+					indirection in the most latency-sensitive path in the product. What it buys
+					is that the IDE integration can never be a second-class citizen: every
+					feature the terminal has must be expressible in the protocol, because the
+					terminal has nothing else. Bugs in the protocol surface immediately for the
+					people who work on Codex daily, instead of being reported months later by
+					extension users.
+				</p>
+			</aside>
+		</section>
+
+		<section class="lesson-section" id="mcp-server" data-minutes="8">
+			<h2>Codex as an MCP server</h2>
+
+			<p>
+				<code>codex mcp-server</code> exposes Codex to <em>other</em> AI tools. Another
+				agent — Claude Code, an IDE assistant, a custom orchestrator — connects and gets
+				Codex as a tool it can call.
+			</p>
+
+			<p>
+				The crate is small, which is the interesting part:
+				<code>codex_tool_config.rs</code>, <code>codex_tool_runner.rs</code>,
+				<code>message_processor.rs</code>, <code>exec_approval.rs</code>,
+				<code>patch_approval.rs</code>. Codex is presented as essentially one tool:
+			</p>
+
+			<figure class="code">
+				<figcaption><span>codex-rs/mcp-server/src/codex_tool_config.rs</span><span class="lines">the tool schema, abridged</span></figcaption>
+				<pre><code class="language-json">"description": "Run a Codex session. Accepts configuration parameters
+                matching the Codex Config struct.",
+"properties": {
+  "approval-policy": {
+    "description": "Approval policy for shell commands generated by the
+                    model: `untrusted`, `on-request`, `never`."
+  },
+  "base-instructions": {
+    "description": "The set of instructions to use instead of the default ones."
+  },
+  "cwd": {
+    "description": "Working directory for the session. If relative, it is
+                    resolved against the server process's current working
+                    directory."
+  }
+}</code></pre>
+			</figure>
+
+			<p>
+				One tool — "run a Codex session" — parameterised by the same
+				<code>Config</code> fields a human would set. Note that the calling agent
+				chooses the <code>approval-policy</code>, which means it can grant itself
+				<code>never</code>. The sandbox remains the actual boundary; Module&nbsp;8's
+				insistence that auto-approval requires a real cage is what makes this safe to
+				expose at all.
+			</p>
+
+			<p>
+				<code>exec_approval.rs</code> and <code>patch_approval.rs</code> exist because
+				approvals must still work when the "user" is another program. MCP has an
+				elicitation mechanism for a server to ask its client a question, and these map
+				Codex's approval requests onto it — the same <code>ServerRequest</code> pattern
+				from Module&nbsp;3, in a third dialect.
+			</p>
+		</section>
+
+		<section class="lesson-section" id="mcp-client" data-minutes="7">
+			<h2>Codex as an MCP client</h2>
+
+			<p>
+				The mirror image: <code class="path">codex-rs/rmcp-client</code> (~11,000 lines)
+				connects <em>out</em> to MCP servers you configure, and
+				<code class="path">codex-rs/codex-mcp</code> manages those connections. Their
+				tools become tools the model can call, indistinguishable from built-ins at the
+				point of use, as Module&nbsp;7 showed.
+			</p>
+
+			<p>
+				So Codex sits on both sides of the same protocol. A single machine can run Codex
+				exposing itself over MCP to one agent while consuming three other MCP servers
+				itself. <code>codex mcp</code> — the subcommand from Module&nbsp;1's list — is
+				how you manage the ones it consumes.
+			</p>
+
+			<div class="callout note">
+				<span class="callout-label">Note</span>
+				<p>
+					Two crates, two directions, similar names:
+					<code class="path">codex-rs/mcp-server</code> is Codex being a server;
+					<code class="path">codex-rs/rmcp-client</code> is Codex being a client;
+					<code class="path">codex-rs/codex-mcp</code> holds the shared connection
+					management that <code>AGENTS.md</code> tells contributors to route changes
+					through.
+				</p>
+			</div>
+		</section>
+
+		<section class="lesson-section" id="sdks" data-minutes="9">
+			<h2>The Python and TypeScript SDKs</h2>
+
+			<p>
+				<code>sdk/</code> holds three things: <code>python/</code>,
+				<code>python-runtime/</code>, and <code>typescript/</code>. The TypeScript
+				package is <code>@openai/codex-sdk</code>, and its module list is the API:
+			</p>
+
+			<figure class="code">
+				<figcaption><span class="lines">sdk/typescript/src/</span></figcaption>
+				<pre><code class="language-plaintext">codex.ts          codexOptions.ts
+thread.ts         threadOptions.ts
+turnOptions.ts    events.ts
+items.ts          exec.ts
+outputSchemaFile.ts
+index.ts</code></pre>
+			</figure>
+
+			<p>
+				<code>codex</code>, <code>thread</code>, <code>turn</code>, <code>events</code>,
+				<code>items</code> — the exact vocabulary of Module&nbsp;4, in TypeScript. That
+				is not a coincidence or a convention someone maintains by hand. Recall the
+				<code>TS</code> derive on every protocol type in Module&nbsp;2, and
+				<code>export_client_param_schemas</code> in Module&nbsp;4's macro: these types
+				are <em>generated</em> from the Rust.
+			</p>
+
+			<p>
+				Both SDKs work by driving the compiled binary — the <code>exec.ts</code> module
+				is the giveaway. You are not reimplementing the agent in another language; you
+				are speaking the app-server protocol to a subprocess. Which is why
+				<code>python-runtime/</code> exists: something has to locate and manage that
+				binary.
+			</p>
+
+			<p>Now Module&nbsp;1's opening example reads differently:</p>
+
+			<figure class="code">
+				<figcaption><span>sdk/python/examples/03_turn_stream_events/sync.py</span><span class="lines">the loop, abridged</span></figcaption>
+				<pre><code class="language-python">turn = thread.turn("Explain SIMD in 3 short bullets.")
+
+for event in turn.stream():
+    if event.method == "turn/started":
+        ...
+    if event.method == "item/agentMessage/delta":
+        delta = event.payload.delta
+    if event.method == "item/completed":
+        root = event.payload.item.root
+    if event.method == "turn/completed":
+        completed_status = event.payload.turn.status.value</code></pre>
+			</figure>
+
+			<p>
+				<code>"turn/started"</code> is a JSON-RPC method name from Module&nbsp;4's macro
+				table. <code>event.payload.item.root</code> is a <code>TurnItem</code>.
+				<code>turn.status</code> is <code>TurnStatus</code> — the four-state enum. This
+				Python is the outermost skin of everything in this course.
+			</p>
+
+			<aside class="concept" data-kind="ts">
+				<p class="concept-label">SDK · Why subprocess rather than a library binding</p>
+				<p>
+					You could bind Rust into Python with PyO3 and skip the process boundary. The
+					subprocess approach wins for a coding agent: the SDK ships as pure Python
+					with no compilation, the agent's crashes cannot take down your process, the
+					sandbox is applied to a child that is already separate, and the same binary
+					serves every language. The cost is serialisation on every message — which is
+					already being paid, because the TUI does the same thing.
+				</p>
+			</aside>
+
+			<p>
+				<code>codex-cli/</code> at the repository root is the third distribution path: an
+				npm package containing <code>bin/</code>, <code>scripts/</code>, and a
+				<code>package.json</code>, which downloads the right native binary for your
+				platform. That is what <code>npm install -g @openai/codex</code> installs — a
+				downloader, not a JavaScript implementation.
+			</p>
+		</section>
+
+		<section class="lesson-section" id="cloud" data-minutes="7">
+			<h2>Codex Cloud</h2>
+
+			<p>
+				The last front door runs somewhere else. Codex Web executes tasks on OpenAI's
+				infrastructure, and this repository holds the client:
+				<code class="path">codex-rs/cloud-tasks</code>,
+				<code>cloud-tasks-client</code>, <code>cloud-tasks-mock-client</code>, and
+				<code>cloud-config</code>.
+			</p>
+
+			<figure class="code">
+				<figcaption><span class="lines">codex-rs/cloud-tasks/src/</span></figcaption>
+				<pre><code class="language-plaintext">app.rs      cli.rs      ui.rs
+new_task.rs env_detect.rs
+scrollable_diff.rs
+util.rs</code></pre>
+			</figure>
+
+			<p>
+				<code>app.rs</code>, <code>ui.rs</code>, <code>scrollable_diff.rs</code> — this
+				is another terminal UI. <code>codex cloud</code> gives you a browser for tasks
+				running in the cloud, with a diff viewer to review what they changed before
+				applying it locally. Module&nbsp;1's <code>codex apply</code> subcommand is the
+				other half: take the diff a cloud task produced and <code>git apply</code> it to
+				your working tree.
+			</p>
+
+			<p>
+				<code>cloud-tasks-mock-client</code> being a full crate is worth noting. Testing
+				against a real cloud service is slow, flaky, and requires credentials, so the
+				client is defined by a trait with two implementations — the same
+				fake-the-boundary pattern as <code>TimeProvider</code> in Module&nbsp;2, scaled
+				up to an entire service.
+			</p>
+
+			<h3>What you now know</h3>
+
+			<p>
+				<code>codex exec</code> is the same event loop as the TUI with a different
+				renderer, and JSONL is its machine surface. <code>app-server</code> is the hub
+				every front door goes through, with stdout so sacred that printing to it is a
+				compile error, and a family of crates splitting protocol from transport from
+				lifecycle. Codex is both an MCP server and an MCP client. The two SDKs drive the
+				compiled binary as a subprocess and their types are generated from the Rust, so
+				the Python you read in Module&nbsp;1 is a direct projection of Module&nbsp;4's
+				protocol. And <code>codex cloud</code> is a terminal client for agents running
+				elsewhere.
+			</p>
+
+			<p>
+				What remains is everything that persists between runs, and everything that lets
+				you change Codex's behaviour without forking it.
+			</p>
+		</section>
+	</article>
+	<script src="manifest.js"></script>
+	<script src="assets/vendor/highlight.min.js"></script>
+	<script src="assets/js/app.js" defer></script>
+</body>
+</html>

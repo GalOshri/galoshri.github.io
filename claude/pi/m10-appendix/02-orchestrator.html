@@ -1,0 +1,105 @@
+<!doctype html>
+<html lang="en">
+<head>
+	<meta charset="utf-8">
+	<meta name="viewport" content="width=device-width, initial-scale=1">
+	<title>The orchestrator · pi · Codebase Academy</title>
+	<link rel="stylesheet" href="../assets/css/site.css">
+</head>
+<body>
+	<article class="lesson">
+		<h1>The orchestrator</h1>
+		<p class="lede">
+			The fifth package — ~2,000 lines, boldly labeled experimental — asks
+			the next question: if one agent is useful, what does <em>managing a
+			fleet</em> of them look like? It's a preview of where the whole field
+			is heading, built from parts you already understand.
+		</p>
+
+		<h2>The architecture: supervisor of subprocesses</h2>
+		<figure class="diagram">
+			<div class="drow">
+				<div class="dbox"><span class="dbox-title">clients</span><span class="dbox-sub">CLI, scripts, UIs</span></div>
+				<span class="darrow">→ <span class="dlabel">local IPC</span></span>
+				<div class="dbox accent"><span class="dbox-title">supervisor</span><span class="dbox-sub">spawn · track · forward · persist</span></div>
+				<span class="darrow">→ <span class="dlabel">RpcCommand / events</span></span>
+				<div class="dbox"><span class="dbox-title">pi #1</span><span class="dbox-sub">rpc mode, project A</span></div>
+			</div>
+			<div class="drow">
+				<div class="dbox faded"><span class="dbox-title">instances.json</span><span class="dbox-sub">what's running, where</span></div>
+				<span class="darrow"> </span>
+				<div class="dbox"><span class="dbox-title">pi #2</span><span class="dbox-sub">rpc mode, project B</span></div>
+				<div class="dbox"><span class="dbox-title">pi #3…</span><span class="dbox-sub">background workers</span></div>
+			</div>
+		</figure>
+		<p>
+			The crucial design fact: the orchestrator <strong>does not embed the
+			agent</strong>. It imports only the <em>types</em> —
+			<code>RpcCommand</code>, <code>AgentSessionEvent</code> — and drives
+			each pi through the same stdin/stdout protocol from last lesson, as an
+			ordinary child process. Requests route by instance id; each child's
+			event stream fans back to whoever is watching; instance records
+			persist to a JSON file so the fleet survives supervisor restarts.
+			If you've met process supervisors — systemd, supervisord, Kubernetes
+			at a stretch — this is that shape, specialized for agents: spawn,
+			health-check (a heartbeat/presence service called
+			<code>radius</code> gives each instance a discoverable identity),
+			forward, restart.
+		</p>
+
+		<aside class="concept" data-kind="eng">
+			<p class="concept-label">Engineering · Process supervision and IPC</p>
+			<p>
+				Two classic patterns meet here. <strong>Supervision</strong>: a
+				parent process owns children's lifecycles — spawn, monitor,
+				restart on crash, reap on shutdown (the process-tree discipline
+				from lesson 6.5, promoted to a whole program's purpose).
+				<strong>IPC</strong> (inter-process communication): processes on
+				one machine talking through OS channels — here local sockets
+				carrying JSON, the plainest possible choice. Processes-plus-pipes
+				beats threads-in-one-process for agent fleets on every axis that
+				matters: isolation (a crashed agent can't corrupt its siblings),
+				independent working directories and permissions, and language
+				neutrality — the supervisor could be rewritten in Python tomorrow
+				without touching pi. The cost is serialization overhead, which is
+				noise next to LLM latencies. This is also, one layer down, exactly
+				how your terminal, your shell, and pi itself already relate —
+				Unix has been "orchestrating processes over pipes" for fifty years.
+			</p>
+		</aside>
+
+		<h2>Why a fleet, and why "experimental"</h2>
+		<p>
+			The use case is visible in how pi's own maintainers work (remember
+			AGENTS.md's rule about <em>multiple pi sessions in one cwd</em>,
+			lesson 1.5): several agents running in parallel — one fixing a bug,
+			one writing tests, one triaging issues — with a human sampling their
+			streams. The orchestrator makes that a managed thing rather than six
+			terminal tabs: spawn workers in the background, list them, attach to
+			one, stop another.
+		</p>
+		<p>
+			And the label? The README warns the package may be removed — the
+			honest marker of code exploring a design space rather than committing
+			to one. Multi-agent supervision is where the industry is actively
+			experimenting (who plans? who reviews? how do agents hand off?), and
+			pi's contribution so far is deliberately minimal: <em>get the plumbing
+			right — spawnable agents, a clean wire protocol, presence — and defer
+			the philosophy</em>. Given how much machinery this course found under
+			"just a loop," expect this space to grow the same way.
+		</p>
+
+		<h2>What you now know</h2>
+		<p>
+			The orchestrator = a process supervisor speaking last lesson's RPC
+			protocol over local IPC, with persisted instance records and
+			heartbeat presence — multi-agent infrastructure as a thin, honest
+			layer over the subprocess design. One lesson remains: where to take
+			everything you've learned.
+		</p>
+	</article>
+	<script src="../manifest.js"></script>
+	<script src="../assets/vendor/highlight.min.js"></script>
+	<script src="../assets/js/app.js" defer></script>
+</body>
+</html>

@@ -1,0 +1,206 @@
+<!doctype html>
+<html lang="en">
+<head>
+	<meta charset="utf-8">
+	<meta name="viewport" content="width=device-width, initial-scale=1">
+	<title>runLoop, part 1: a turn · pi · Codebase Academy</title>
+	<link rel="stylesheet" href="../assets/css/site.css">
+</head>
+<body>
+	<article class="lesson">
+		<h1>runLoop, part 1: a turn</h1>
+		<p class="lede">
+			The centerpiece of the course. You've seen <code>runLoop</code> condensed
+			(lesson 1.1) and flowcharted (lesson 2.3); now you have every concept
+			needed to read the real thing — and this time we keep all the details:
+			steering, error paths, turn events, and the hooks that let an
+			application reshape a run in flight.
+		</p>
+
+		<h2>The full skeleton, honestly</h2>
+		<div class="walkthrough">
+			<figure class="code">
+				<figcaption><span>packages/agent/src/agent-loop.ts</span><span class="lines">runLoop — entry</span></figcaption>
+				<pre><code class="language-typescript">async function runLoop(
+	initialContext: AgentContext,
+	newMessages: AgentMessage[],
+	initialConfig: AgentLoopConfig,
+	signal: AbortSignal | undefined,
+	emit: AgentEventSink,
+	streamFn?: StreamFn,
+): Promise&lt;void&gt; {
+	let currentContext = initialContext;
+	let config = initialConfig;
+	let firstTurn = true;
+	// Check for steering messages at start (user may have typed while waiting)
+	let pendingMessages: AgentMessage[] = (await config.getSteeringMessages?.()) || [];</code></pre>
+			</figure>
+			<p class="anno">
+				Look at the parameters: everything arrives injected. Context (the
+				conversation + tools), config (a bag of functions — the hooks),
+				an abort signal, an event sink, a stream function. <code>runLoop</code>
+				owns no state of its own; it's a pure orchestrator. Note also the
+				very first line of logic: check for steering messages <em>before</em>
+				doing anything, because the user may have typed while a previous
+				operation was settling. (The <code>?.()</code> is optional chaining —
+				"call it if it exists" — since every hook is optional.)
+			</p>
+			<figure class="code">
+				<figcaption><span class="lines">the two loops + injection</span></figcaption>
+				<pre><code class="language-typescript">	// Outer loop: continues when queued follow-up messages arrive after agent would stop
+	while (true) {
+		let hasMoreToolCalls = true;
+
+		// Inner loop: process tool calls and steering messages
+		while (hasMoreToolCalls || pendingMessages.length &gt; 0) {
+			if (!firstTurn) {
+				await emit({ type: "turn_start" });
+			} else {
+				firstTurn = false;
+			}
+
+			// Process pending messages (inject before next assistant response)
+			if (pendingMessages.length &gt; 0) {
+				for (const message of pendingMessages) {
+					await emit({ type: "message_start", message });
+					await emit({ type: "message_end", message });
+					currentContext.messages.push(message);
+					newMessages.push(message);
+				}
+				pendingMessages = [];
+			}</code></pre>
+			</figure>
+			<p class="anno">
+				Injected messages get the full event ceremony
+				(<code>message_start</code>/<code>message_end</code>) — so the UI
+				displays your steering text and the session file records it, through
+				the same broadcast machinery as everything else. Consistency like
+				this is why subscribers (lesson 2.2) can be simple.
+			</p>
+			<figure class="code">
+				<figcaption><span class="lines">the model call + error path</span></figcaption>
+				<pre><code class="language-typescript">			// Stream assistant response
+			const message = await streamAssistantResponse(currentContext, config, signal, emit, streamFn);
+			newMessages.push(message);
+
+			if (message.stopReason === "error" || message.stopReason === "aborted") {
+				await emit({ type: "turn_end", message, toolResults: [] });
+				await emit({ type: "agent_end", messages: newMessages });
+				return;
+			}</code></pre>
+			</figure>
+			<p class="anno">
+				The whole error story of Modules 3–4, condensed to two lines of
+				consumer code: failures arrive as ordinary messages with a
+				<code>stopReason</code>, get announced like any turn, and end the run
+				cleanly. No try/catch. The failed message is already in the context
+				and the session file — tomorrow you can resume the conversation and
+				the model will see what went wrong.
+			</p>
+			<figure class="code">
+				<figcaption><span class="lines">tools, then the turn closes</span></figcaption>
+				<pre><code class="language-typescript">			// Check for tool calls
+			const toolCalls = message.content.filter((c) =&gt; c.type === "toolCall");
+
+			const toolResults: ToolResultMessage[] = [];
+			hasMoreToolCalls = false;
+			if (toolCalls.length &gt; 0) {
+				const executedToolBatch = await executeToolCalls(currentContext, message, config, signal, emit);
+				toolResults.push(...executedToolBatch.messages);
+				hasMoreToolCalls = !executedToolBatch.terminate;
+
+				for (const result of toolResults) {
+					currentContext.messages.push(result);
+					newMessages.push(result);
+				}
+			}
+
+			await emit({ type: "turn_end", message, toolResults });</code></pre>
+			</figure>
+			<p class="anno">
+				The heartbeat you already know — filter for tool calls, execute,
+				append results — plus one subtlety: <code>terminate</code>. A tool
+				batch can vote to stop the loop even though tools ran (a
+				plan-approval tool, say, whose whole point is "pause here for the
+				human"). <code>hasMoreToolCalls = !executedToolBatch.terminate</code>
+				is that vote being counted.
+			</p>
+		</div>
+
+		<h2>The seams: hooks between turns</h2>
+		<p>What happens after <code>turn_end</code> is the loop's quiet superpower:</p>
+		<figure class="code">
+			<figcaption><span>packages/agent/src/agent-loop.ts</span><span class="lines">between turns, abridged</span></figcaption>
+			<pre><code class="language-typescript">			const nextTurnSnapshot = await config.prepareNextTurn?.(nextTurnContext);
+			if (nextTurnSnapshot) {
+				currentContext = nextTurnSnapshot.context ?? currentContext;
+				config = { ...config, model: nextTurnSnapshot.model ?? config.model, /* thinking level too */ };
+			}
+
+			if (await config.shouldStopAfterTurn?.({ message, toolResults, context: currentContext, newMessages })) {
+				await emit({ type: "agent_end", messages: newMessages });
+				return;
+			}
+
+			pendingMessages = (await config.getSteeringMessages?.()) || [];
+		}
+
+		// Inner loop done — agent would stop here. Check for follow-up messages.
+		const followUpMessages = (await config.getFollowUpMessages?.()) || [];
+		if (followUpMessages.length &gt; 0) {
+			pendingMessages = followUpMessages;
+			continue;   // outer loop goes again
+		}
+		break;
+	}
+
+	await emit({ type: "agent_end", messages: newMessages });
+}</code></pre>
+		</figure>
+		<p>
+			Four hooks, four capabilities, all owned by the caller:
+			<strong><code>prepareNextTurn</code></strong> may swap the model, the
+			thinking level, or even the whole context between turns — this is where
+			the coding agent triggers <em>compaction</em> when the conversation
+			nears the context window (Module 7).
+			<strong><code>shouldStopAfterTurn</code></strong> is a policy veto
+			(cap turns, stop on budget).
+			<strong><code>getSteeringMessages</code></strong> is polled after
+			<em>every</em> turn — your mid-task "actually, use spaces not tabs"
+			enters here, before the next model call.
+			<strong><code>getFollowUpMessages</code></strong> is polled only when
+			the agent would otherwise finish — queued follow-up work starts a fresh
+			inner loop without ending the run.
+		</p>
+
+		<aside class="concept" data-kind="eng">
+			<p class="concept-label">Engineering · Policy-free cores</p>
+			<p>
+				Count what <code>runLoop</code> does <em>not</em> know: no retry
+				policy, no compaction strategy, no turn limits, no UI, no
+				persistence. Every opinion is a config function with a
+				<code>?.</code> — absent by default, supplied by whoever has the
+				context to decide. This is the "mechanism, not policy" principle
+				(old Unix wisdom), and it's why this one loop can power a terminal
+				product, a Slack bot, and a test harness unchanged. When you build
+				your own agent — and after this module you genuinely could — resist
+				putting policy in the loop. The loop should be boring; boring cores
+				age well.
+			</p>
+		</aside>
+
+		<h2>What you now know</h2>
+		<p>
+			A turn = optional injection → model call → tool batch →
+			<code>turn_end</code> → hooks. Errors end runs as data; steering slips
+			in at turn boundaries; follow-ups restart the music after the band
+			stopped. One box in the diagram is still shut:
+			<code>executeToolCalls</code>. Next lesson opens it — parallelism,
+			validation, blocking hooks, and cancellation included.
+		</p>
+	</article>
+	<script src="../manifest.js"></script>
+	<script src="../assets/vendor/highlight.min.js"></script>
+	<script src="../assets/js/app.js" defer></script>
+</body>
+</html>

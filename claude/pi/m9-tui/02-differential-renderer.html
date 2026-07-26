@@ -1,0 +1,181 @@
+<!doctype html>
+<html lang="en">
+<head>
+	<meta charset="utf-8">
+	<meta name="viewport" content="width=device-width, initial-scale=1">
+	<title>The differential renderer · pi · Codebase Academy</title>
+	<link rel="stylesheet" href="../assets/css/site.css">
+</head>
+<body>
+	<article class="lesson">
+		<h1>The differential renderer</h1>
+		<p class="lede">
+			<code>TUI.doRender()</code> is where strings become a smooth 60fps
+			terminal UI. It's also a masterclass in a certain kind of engineering:
+			a simple fast path, guarded by an honest list of cases where
+			simplicity would lie.
+		</p>
+
+		<aside class="concept" data-kind="eng">
+			<p class="concept-label">Engineering · ANSI escape codes: the terminal as a canvas</p>
+			<p>
+				A terminal is a character grid you draw on with <em>escape
+				sequences</em> — byte strings starting with ESC (<code>\x1b</code>)
+				that terminals interpret as commands instead of text. The handful
+				this lesson needs: <code>\x1b[3A</code> / <code>\x1b[3B</code> move
+				the cursor up/down 3 rows; <code>\r</code> returns to column 0;
+				<code>\x1b[2K</code> erases the current line;
+				<code>\x1b[2J\x1b[H</code> clears the screen and homes. Colors are
+				the same idea (<code>\x1b[31m</code> = red) — which is why a
+				component's "string" can carry styling.
+			</p>
+			<p>
+				The modern gem is <strong>synchronized output</strong>:
+				<code>\x1b[?2026h</code> … <code>\x1b[?2026l</code> tells the
+				terminal "hold all of this and apply it in one frame." Without it,
+				a multi-write update can be displayed half-finished — that's what
+				flicker <em>is</em>. Every buffer <code>doRender</code> emits is
+				wrapped in this pair.
+			</p>
+		</aside>
+
+		<h2>Throttling: before any drawing</h2>
+		<figure class="code">
+			<figcaption><span>packages/tui/src/tui.ts</span><span class="lines">requestRender / scheduleRender, abridged</span></figcaption>
+			<pre><code class="language-typescript">requestRender(force = false): void {
+	// force: wipe previousLines etc. → guarantees a full clear+redraw
+	if (this.renderRequested) return;      // coalesce: many requests, one render
+	this.renderRequested = true;
+	process.nextTick(() =&gt; this.scheduleRender());
+}
+
+private scheduleRender(): void {
+	const elapsed = performance.now() - this.lastRenderAt;
+	const delay = Math.max(0, TUI.MIN_RENDER_INTERVAL_MS - elapsed);  // 16ms ≈ 60fps
+	this.renderTimer = setTimeout(() =&gt; {
+		this.renderRequested = false;
+		this.lastRenderAt = performance.now();
+		this.doRender();
+		if (this.renderRequested) this.scheduleRender();  // requests during render? go again
+	}, delay);
+}</code></pre>
+		</figure>
+		<p>
+			The game-loop pattern: any number of "something changed!" calls
+			collapse into at most one frame per 16ms. A model streaming fifty
+			deltas a second costs fifty cheap boolean sets and ~60 actual renders,
+			maximum. Note the last line — a request that arrives <em>during</em> a
+			render isn't lost; it books the next frame.
+		</p>
+
+		<h2>The decision ladder</h2>
+		<p><code>doRender</code> renders the component tree to <code>newLines</code>, composites any overlays (dialogs), extracts the cursor marker — then walks a ladder from expensive-but-safe to cheap-but-conditional:</p>
+		<figure class="code">
+			<figcaption><span>packages/tui/src/tui.ts</span><span class="lines">doRender's guards, abridged</span></figcaption>
+			<pre><code class="language-typescript">// First render - just output everything without clearing (assumes clean screen)
+if (this.previousLines.length === 0 &amp;&amp; !widthChanged &amp;&amp; !heightChanged) {
+	fullRender(false);
+	return;
+}
+
+// Width changes always need a full re-render because wrapping changes.
+if (widthChanged) {
+	fullRender(true);
+	return;
+}
+
+// Height changes normally need a full re-render ... but Termux changes height
+// when the software keyboard shows or hides. In that environment, a full
+// redraw causes the entire history to replay on every toggle.
+if (heightChanged &amp;&amp; !isTermuxSession()) {
+	fullRender(true);
+	return;
+}
+
+// Content shrunk below the working area and no overlays - re-render to clear empty rows
+if (this.clearOnShrink &amp;&amp; newLines.length &lt; this.maxLinesRendered &amp;&amp; this.overlayStack.length === 0) {
+	fullRender(true);
+	return;
+}</code></pre>
+		</figure>
+		<p>
+			Read the comments — each guard is a documented war story. Width change:
+			every wrapped line re-wraps, the diff would be garbage, redraw.
+			Height change: same, <em>except on Termux</em> (Android), where the
+			soft keyboard resizes the terminal constantly and a redraw-per-toggle
+			would replay your whole scrollback — a shipping-on-phones bug you'd
+			never anticipate from theory. This ladder is what production rendering
+			code actually looks like: the algorithm is 20%, the guards are 80%.
+		</p>
+
+		<h2>The fast path: diff and repaint the window</h2>
+		<figure class="code">
+			<figcaption><span>packages/tui/src/tui.ts</span><span class="lines">the diff + targeted repaint, abridged</span></figcaption>
+			<pre><code class="language-typescript">// Find first and last changed lines
+let firstChanged = -1, lastChanged = -1;
+const maxLines = Math.max(newLines.length, this.previousLines.length);
+for (let i = 0; i &lt; maxLines; i++) {
+	const oldLine = i &lt; this.previousLines.length ? this.previousLines[i] : "";
+	const newLine = i &lt; newLines.length ? newLines[i] : "";
+	if (oldLine !== newLine) {
+		if (firstChanged === -1) firstChanged = i;
+		lastChanged = i;
+	}
+}
+
+// No changes - just update the hardware cursor if it moved
+if (firstChanged === -1) { this.positionHardwareCursor(cursorPos, newLines.length); return; }
+
+// Differential rendering can only touch what was actually visible.
+if (firstChanged &lt; prevViewportTop) { fullRender(true); return; }
+
+// Build one buffer: sync-begin, move cursor to firstChanged,
+// for each line in [firstChanged..lastChanged]: "\r\x1b[2K" + line,
+// clear any leftover old lines, sync-end — then a single terminal.write().</code></pre>
+		</figure>
+		<p>
+			<code>previousLines</code> is the entire trick: keep last frame's
+			strings, compare with <code>!==</code> (string comparison — the
+			"virtual DOM" is an array), find the changed window, move the cursor
+			there with relative <code>\x1b[nA</code> hops, and rewrite only those
+			rows. While the model streams prose, the window is typically one or
+			two lines at the bottom: a repaint measured in <em>tens of bytes</em>.
+			Over SSH on a bad connection, that's the difference between usable
+			and unusable. One more honesty guard sits mid-path: if a change lies
+			above the visible viewport (content scrolled), relative cursor moves
+			can't reach it — full redraw. The fast path never guesses.
+		</p>
+
+		<details class="digression">
+			<summary>The bits we waved past: overlays, images, scroll bookkeeping</summary>
+			<div class="digression-body">
+				<p>
+					The real function also composites an <em>overlay stack</em>
+					(modal dialogs painted over the base lines before diffing — the
+					model picker is one), tracks Kitty-protocol inline images (which
+					occupy multiple rows and must be deleted/redrawn as units —
+					<code>expandChangedRangeForKittyImages</code>), and maintains
+					viewport arithmetic (<code>previousViewportTop</code>,
+					<code>computeLineDiff</code>) so cursor-relative moves stay
+					correct as content scrolls. Plus a <code>PI_DEBUG_REDRAW</code>
+					env flag that logs every full-redraw's reason to a file —
+					the maintainers debug this code often enough to keep
+					instrumentation in it.
+				</p>
+			</div>
+		</details>
+
+		<h2>What you now know</h2>
+		<p>
+			Fast terminal UI = throttle-and-coalesce, keep last frame, diff
+			strings, repaint the changed window inside synchronized-output markers
+			— and a ladder of honest full-redraw guards for every case where the
+			diff would lie. Next: the other direction — turning the terminal's
+			byte soup of keystrokes into typed events.
+		</p>
+	</article>
+	<script src="../manifest.js"></script>
+	<script src="../assets/vendor/highlight.min.js"></script>
+	<script src="../assets/js/app.js" defer></script>
+</body>
+</html>

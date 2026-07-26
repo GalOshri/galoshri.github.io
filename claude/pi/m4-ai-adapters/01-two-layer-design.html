@@ -1,0 +1,126 @@
+<!doctype html>
+<html lang="en">
+<head>
+	<meta charset="utf-8">
+	<meta name="viewport" content="width=device-width, initial-scale=1">
+	<title>Wire formats vs. vendors · pi · Codebase Academy</title>
+	<link rel="stylesheet" href="../assets/css/site.css">
+</head>
+<body>
+	<article class="lesson">
+		<h1>Wire formats vs. vendors</h1>
+		<p class="lede">
+			How do you support 35 providers without writing 35 network clients?
+			By noticing that providers vastly outnumber <em>protocols</em>. pi's
+			sharpest structural insight is splitting "who you buy from" apart from
+			"what JSON goes over the wire" — one small directory for each.
+		</p>
+
+		<h2>Two directories, two questions</h2>
+		<figure class="diagram">
+			<div class="drow">
+				<div class="dbox"><span class="dbox-title">src/providers/</span><span class="dbox-sub">35 vendors · "who & what's on the menu"<br>~1,400 hand-written lines</span></div>
+				<span class="darrow">→ <span class="dlabel">each binds to one of</span></span>
+				<div class="dbox accent"><span class="dbox-title">src/api/</span><span class="dbox-sub">9 wire formats · "what JSON, what SSE"<br>~9,100 lines, the hard part</span></div>
+			</div>
+		</figure>
+		<p>The nine wire formats — this union from <code>types.ts</code> is the real map of the LLM industry:</p>
+		<figure class="code">
+			<figcaption><span>packages/ai/src/types.ts</span><span class="lines">lines 15–24</span></figcaption>
+			<pre><code class="language-typescript">export type KnownApi =
+	| "openai-completions"      // the de-facto industry standard, spoken by ~20 vendors
+	| "mistral-conversations"
+	| "openai-responses"        // OpenAI's newer stateful API
+	| "azure-openai-responses"
+	| "openai-codex-responses"
+	| "anthropic-messages"
+	| "bedrock-converse-stream" // AWS's own envelope
+	| "google-generative-ai"
+	| "google-vertex";</code></pre>
+		</figure>
+		<p>
+			Each name corresponds to one module in <code>src/api/</code>, and every
+			such module exports exactly two functions — <code>stream</code> and
+			<code>streamSimple</code> — satisfying the <code>ProviderStreams</code>
+			interface from Module 3. That uniformity is what lets
+			<code>createProvider</code> treat adapters as interchangeable parts.
+		</p>
+
+		<h2>Why the split pays</h2>
+		<p>
+			Here's the economics. An adapter is <em>expensive</em>: a thousand-plus
+			lines of request building, SSE parsing, event translation, edge cases
+			(you'll read one next lesson). A provider binding is <em>cheap</em>:
+			~20 lines of URL, auth, and catalog. So when Groq, Cerebras, Together,
+			DeepSeek, xAI and fifteen others all chose to imitate OpenAI's API —
+			and they did, because compatibility attracts customers — pi gets each
+			of them nearly free. One hard adapter, twenty cheap bindings.
+		</p>
+		<p>
+			The industry calls these "OpenAI-compatible" APIs, and lesson 4.3 will
+			show how compatible they actually are (spoiler: it's a compatibility
+			<em>matrix</em>, not a yes). But even imperfect compatibility beats
+			twenty bespoke clients.
+		</p>
+
+		<aside class="concept" data-kind="eng">
+			<p class="concept-label">Engineering · The adapter pattern in the wild</p>
+			<p>
+				Textbook definition: an <strong>adapter</strong> converts one
+				interface into another, letting incompatible things collaborate. The
+				textbook stops there; production adds the deeper lesson —
+				<em>where you draw the adapter line determines how much of your code
+				stays clean</em>. pi draws it at the event grammar: adapters absorb
+				100% of provider weirdness and emit only normalized
+				<code>AssistantMessageEvent</code>s. Nothing above the line ever
+				branches on "is this Anthropic?"
+			</p>
+			<p>
+				The two tells of a well-drawn adapter boundary, both visible here:
+				(1) the interface the adapters implement is <em>small</em> (two
+				functions), and (2) adding a new implementation touches <em>zero</em>
+				existing files except a registry. Compare Python's database API
+				(psycopg2, sqlite3 — one DB-API spec, many drivers): same shape.
+				When you meet a new codebase, finding its adapter seams first tells
+				you where the mess is quarantined.
+			</p>
+		</aside>
+
+		<h2>Dispatch, concretely</h2>
+		<p>Recall the provider factory from lesson 3.3. Its dispatch logic is the whole trick:</p>
+		<figure class="code">
+			<figcaption><span>packages/ai/src/models.ts</span><span class="lines">inside createProvider, abridged</span></figcaption>
+			<pre><code class="language-typescript">const apiFor = (model: Model&lt;Api&gt;): ProviderStreams | undefined =&gt; single ?? byApi?.[model.api];
+
+return {
+	// ...
+	stream: (model, context, options) =&gt;
+		dispatch(model, (streams) =&gt; streams.stream(model, context, options)),
+	streamSimple: (model, context, options) =&gt;
+		dispatch(model, (streams) =&gt; streams.streamSimple(model, context, options)),
+};</code></pre>
+		</figure>
+		<p>
+			A model record says which API it speaks (<code>model.api</code>); the
+			provider holds one adapter (or a small map of them); dispatch is a
+			dictionary lookup. And because every adapter is wrapped in
+			<code>lazyApi</code> from last lesson, even a provider with no
+			implementation for a model's API fails <em>as an error event</em>, not an
+			exception. The pieces you've learned are clicking together.
+		</p>
+
+		<h2>The module's itinerary</h2>
+		<p>
+			With the map in hand: lesson 2 dissects the cleanest adapter
+			(<code>anthropic-messages</code>) top to bottom. Lesson 3 tours the
+			messiest (<code>openai-completions</code> and its compat matrix). Then
+			the resilience layer — retries (4), JSON repair (5), prompt caching and
+			cost (6) — and finally how pi logs into subscription accounts and how
+			the whole stack gets tested without spending a cent (7).
+		</p>
+	</article>
+	<script src="../manifest.js"></script>
+	<script src="../assets/vendor/highlight.min.js"></script>
+	<script src="../assets/js/app.js" defer></script>
+</body>
+</html>

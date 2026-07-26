@@ -1,0 +1,194 @@
+<!doctype html>
+<html lang="en">
+<head>
+	<meta charset="utf-8">
+	<meta name="viewport" content="width=device-width, initial-scale=1">
+	<title>runLoop, part 2: executing tools · pi · Codebase Academy</title>
+	<link rel="stylesheet" href="../assets/css/site.css">
+</head>
+<body>
+	<article class="lesson">
+		<h1>runLoop, part 2: executing tools</h1>
+		<p class="lede">
+			When the model asks for three file reads at once, must they run one by
+			one? Executing tool calls is a small pipeline with real decisions:
+			parallelism, validation, permission hooks, cancellation, and error
+			envelopes. It's also where extensions will later plug in their power.
+		</p>
+
+		<h2>Choosing a strategy</h2>
+		<figure class="code">
+			<figcaption><span>packages/agent/src/agent-loop.ts</span><span class="lines">executeToolCalls, verbatim</span></figcaption>
+			<pre><code class="language-typescript">async function executeToolCalls(currentContext, assistantMessage, config, signal, emit) {
+	const toolCalls = assistantMessage.content.filter((c) =&gt; c.type === "toolCall");
+	const hasSequentialToolCall = toolCalls.some(
+		(tc) =&gt; currentContext.tools?.find((t) =&gt; t.name === tc.name)?.executionMode === "sequential",
+	);
+	if (config.toolExecution === "sequential" || hasSequentialToolCall) {
+		return executeToolCallsSequential(...);
+	}
+	return executeToolCallsParallel(...);
+}</code></pre>
+		</figure>
+		<p>
+			Default: parallel — three reads overlap their waiting and finish together
+			(remember, JavaScript concurrency is overlapping I/O waits, lesson 2.3).
+			But <em>one</em> tool marked <code>executionMode: "sequential"</code>
+			forces the whole batch sequential: if an <code>edit</code> is in the mix,
+			you don't want a <code>bash</code> racing it. Conservative, simple,
+			correct-by-default.
+		</p>
+
+		<h2>Each call: a three-stage pipeline</h2>
+		<figure class="diagram">
+			<div class="drow">
+				<div class="dbox"><span class="dbox-title">prepare</span><span class="dbox-sub">find tool · fix args ·<br>validate schema · beforeToolCall</span></div>
+				<span class="darrow">→</span>
+				<div class="dbox accent"><span class="dbox-title">execute</span><span class="dbox-sub">tool.execute(...)<br>streams onUpdate events</span></div>
+				<span class="darrow">→</span>
+				<div class="dbox"><span class="dbox-title">finalize</span><span class="dbox-sub">afterToolCall may rewrite ·<br>wrap as ToolResultMessage</span></div>
+			</div>
+			<figcaption class="dcaption">Any stage can short-circuit to an error result. Nothing throws past this pipeline.</figcaption>
+		</figure>
+
+		<div class="walkthrough">
+			<figure class="code">
+				<figcaption><span>packages/agent/src/agent-loop.ts</span><span class="lines">prepareToolCall, abridged</span></figcaption>
+				<pre><code class="language-typescript">const tool = currentContext.tools?.find((t) =&gt; t.name === toolCall.name);
+if (!tool) {
+	return { kind: "immediate", result: createErrorToolResult(`Tool ${toolCall.name} not found`), isError: true };
+}
+
+try {
+	const preparedToolCall = prepareToolCallArguments(tool, toolCall);   // optional shim
+	const validatedArgs = validateToolArguments(tool, preparedToolCall); // TypeBox schema check
+	if (config.beforeToolCall) {
+		const beforeResult = await config.beforeToolCall({ assistantMessage, toolCall, args: validatedArgs, context: currentContext }, signal);
+		if (beforeResult?.block) {
+			return { kind: "immediate", result: createErrorToolResult(beforeResult.reason || "Tool execution was blocked"), isError: true };
+		}
+	}
+	return { kind: "prepared", toolCall, tool, args: validatedArgs };
+} catch (error) {
+	return { kind: "immediate", result: createErrorToolResult(String(error)), isError: true };
+}</code></pre>
+			</figure>
+			<p class="anno">
+				Four gates before any tool code runs. <em>Does the tool exist?</em>
+				(Models hallucinate tool names; that's an error <em>result</em>, so
+				the model reads it and corrects itself.) <em>Can the args be fixed?</em>
+				(<code>prepareArguments</code> absorbs model quirks — some models
+				send the edits array as a JSON <em>string</em>.) <em>Do they satisfy
+				the schema?</em> (lesson 3.2's third job.) <em>Does anyone
+				object?</em> — <code>beforeToolCall</code> can <strong>block</strong>
+				the call with a reason. That one hook is the foundation of every
+				permission system in Module 8: "ask the human before bash runs" is
+				an extension returning <code>{ block: true }</code>. Note the return
+				shape: <code>"immediate"</code> vs <code>"prepared"</code> — another
+				discriminated union, steering the pipeline.
+			</p>
+			<figure class="code">
+				<figcaption><span class="lines">executePreparedToolCall, abridged</span></figcaption>
+				<pre><code class="language-typescript">try {
+	const result = await prepared.tool.execute(
+		prepared.toolCall.id,
+		prepared.args as never,
+		signal,
+		(partialResult) =&gt; {
+			if (!acceptingUpdates) return;
+			updateEvents.push(Promise.resolve(emit({ type: "tool_execution_update", ..., partialResult })));
+		},
+	);
+	acceptingUpdates = false;
+	await Promise.all(updateEvents);
+	return { result, isError: false };
+} catch (error) {
+	return { result: createErrorToolResult(String(error)), isError: true };
+}</code></pre>
+			</figure>
+			<p class="anno">
+				The actual execution, wearing three seatbelts: the
+				<code>onUpdate</code> callback forwards partial results as events
+				(live bash output!) but flips <code>acceptingUpdates</code> off when
+				the tool settles — a straggling callback from a sloppy tool can't
+				emit ghost events; all update events are awaited before returning —
+				no event ever arrives <em>after</em> its tool's end event; and the
+				catch converts any throw into an error result. Remember the
+				AgentTool contract said "throw on failure"? Here's the net that
+				makes that safe.
+			</p>
+			<figure class="code">
+				<figcaption><span class="lines">finalizeExecutedToolCall, abridged</span></figcaption>
+				<pre><code class="language-typescript">if (config.afterToolCall) {
+	const afterResult = await config.afterToolCall({ toolCall, args, result, isError, context }, signal);
+	if (afterResult) {
+		result = {
+			content: afterResult.content ?? result.content,
+			details: afterResult.details ?? result.details,
+			terminate: afterResult.terminate ?? result.terminate,
+		};
+		isError = afterResult.isError ?? isError;
+	}
+}</code></pre>
+			</figure>
+			<p class="anno">
+				The exit interview: <code>afterToolCall</code> may rewrite anything —
+				truncate a huge output, redact a secret, flip a result to an error,
+				or set <code>terminate</code>. The <code>??</code> operator ("use the
+				left side unless it's null/undefined") makes the rewrite surgical:
+				override only what you return. Then the result is wrapped as the
+				<code>ToolResultMessage</code> you know from lesson 2.5 and
+				announced on the broadcast.
+			</p>
+		</div>
+
+		<h2>Parallel, but orderly</h2>
+		<p>
+			The parallel variant has one elegant subtlety: it <em>prepares</em>
+			calls one by one (validation and blocking hooks stay deterministic),
+			collects the executions as an array of pending functions, runs them
+			concurrently via <code>Promise.all</code> — and then emits the result
+			<em>messages</em> in the assistant's original call order, regardless of
+			which finished first. Models expect results to line up with their
+			requests; the wall-clock race stays invisible.
+		</p>
+
+		<aside class="concept" data-kind="node">
+			<p class="concept-label">Node.js · AbortController and AbortSignal</p>
+			<p>
+				Cancellation in JavaScript is cooperative and flows through two tiny
+				classes: an <code>AbortController</code> has a <code>.signal</code>
+				and an <code>.abort()</code> method; you hand the signal to
+				everything you might want to stop. <code>fetch</code> aborts the
+				HTTP request natively; your own code checks
+				<code>signal?.aborted</code> at sensible points — as this pipeline
+				does between stages, and as the SSE reader did in lesson 4.2.
+			</p>
+			<p>
+				Trace the whole journey: you press <kbd>Esc</kbd> → the Agent's
+				<code>AbortController.abort()</code> fires → the same signal object,
+				threaded through loop → stream → adapter → tools, flips everywhere
+				at once → the model request dies mid-flight, running tools wind
+				down, and the run ends with <code>stopReason: "aborted"</code> — as
+				<em>data</em>, in the session file. Python's closest analogue is
+				<code>asyncio</code> task cancellation, but signals are more
+				explicit: you can see in every function signature whether it's
+				cancellable, because the signal parameter is right there.
+			</p>
+		</aside>
+
+		<h2>What you now know</h2>
+		<p>
+			Tool execution = strategy choice, then prepare/execute/finalize per
+			call, with validation and two rewrite hooks, ghost-proof streaming
+			updates, order-preserving parallelism, and a cancellation signal
+			threaded through everything. The loop is now fully open. Next: the
+			<code>Agent</code> class that gives this machinery a memory and an
+			audience.
+		</p>
+	</article>
+	<script src="../manifest.js"></script>
+	<script src="../assets/vendor/highlight.min.js"></script>
+	<script src="../assets/js/app.js" defer></script>
+</body>
+</html>

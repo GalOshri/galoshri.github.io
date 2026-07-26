@@ -1,0 +1,244 @@
+<!doctype html>
+<html lang="en">
+<head>
+	<meta charset="utf-8">
+	<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+	<meta name="color-scheme" content="light dark">
+	<title>Styleguide · Codex Explainer</title>
+	<link rel="stylesheet" href="assets/css/site.css">
+</head>
+<body>
+	<div class="page">
+		<article class="lesson">
+			<h1>Styleguide</h1>
+			<p class="lede">
+				Every component the modules use, on one page. Check this in both light and
+				dark mode, and at phone width, after any CSS change. Not part of the course —
+				it is deliberately not in <code>manifest.js</code>.
+			</p>
+
+			<h2>Prose</h2>
+			<p>
+				Body text at 17px with a 68ch measure. Inline <code>code</code> looks like
+				this, a file-path chip looks like
+				<code class="path">codex-rs/core/src/safety.rs</code>, and a key looks like
+				<kbd>ctrl+c</kbd>. <strong>Strong text</strong>, <em>emphasis</em>, and a
+				<a href="index.html">link</a>.
+			</p>
+			<blockquote>
+				A blockquote, for quoting a doc comment or a commit message.
+			</blockquote>
+			<ul>
+				<li>An unordered list item</li>
+				<li>Another item</li>
+			</ul>
+
+			<h3>A heading three</h3>
+			<p>Used for subsections inside a lesson section.</p>
+
+			<h2>Table (always wrapped)</h2>
+			<div class="table-wrap">
+				<table>
+					<thead>
+						<tr><th>Crate</th><th>Role</th><th>Module</th></tr>
+					</thead>
+					<tbody>
+						<tr><td><code>codex-core</code></td><td>The agent loop</td><td>5</td></tr>
+						<tr><td><code>codex-protocol</code></td><td>Shared vocabulary</td><td>4</td></tr>
+						<tr><td><code>codex-tui</code></td><td>Terminal interface</td><td>9</td></tr>
+					</tbody>
+				</table>
+			</div>
+
+			<h2>Concept boxes (five kinds)</h2>
+			<aside class="concept" data-kind="rust">
+				<p class="concept-label">Rust · Result and the ? operator</p>
+				<p>
+					Every fallible call returns <code>Ok(value)</code> or
+					<code>Err(problem)</code>. The <code>?</code> operator means "unwrap it or
+					return the error to my caller" — Python's <code>try</code>/<code>except</code>,
+					except the compiler forces you to handle it and every failure point is
+					visible.
+				</p>
+			</aside>
+			<aside class="concept" data-kind="os">
+				<p class="concept-label">OS · What "arg0" means</p>
+				<p>
+					Slot zero of a process's argument list is the name it was invoked as, not the
+					file on disk. Because a hard link gives one file several names, a program can
+					read <code>argv[0]</code> and behave like a different tool entirely.
+				</p>
+			</aside>
+			<aside class="concept" data-kind="llm">
+				<p class="concept-label">LLM · Tool calling</p>
+				<p>
+					Instead of replying with prose, the model can reply with a structured request
+					— "call <code>shell</code> with <code>{"cmd": "cargo test"}</code>" — that
+					your program executes and answers.
+				</p>
+			</aside>
+			<aside class="concept" data-kind="eng">
+				<p class="concept-label">Engineering · Append-only logs</p>
+				<p>
+					Never rewrite history; only add to it. Crash-safe by construction, and the
+					full past stays reconstructable.
+				</p>
+			</aside>
+			<aside class="concept" data-kind="ts">
+				<p class="concept-label">SDK · Generated types</p>
+				<p>
+					The TypeScript SDK's types are generated from the Rust protocol crate, so
+					they cannot drift from the wire format.
+				</p>
+			</aside>
+
+			<h2>Code figure with file header</h2>
+			<figure class="code">
+				<figcaption><span>codex-rs/core/src/safety.rs</span><span class="lines">lines 20–30</span></figcaption>
+				<pre><code class="language-rust">#[derive(Debug, PartialEq)]
+pub enum SafetyCheck {
+    AutoApprove {
+        sandbox_type: SandboxType,
+        user_explicitly_approved: bool,
+    },
+    AskUser,
+    Reject {
+        reason: String,
+    },
+}</code></pre>
+			</figure>
+
+			<h2>Other languages</h2>
+			<figure class="code">
+				<figcaption><span>sdk/python/examples/01_quickstart_constructor/sync.py</span><span class="lines">python</span></figcaption>
+				<pre><code class="language-python">from openai_codex import Codex
+
+with Codex(config=runtime_config()) as codex:
+    thread = codex.thread_start(model="gpt-5.4")
+    result = thread.run("Say hello in one sentence.")
+    print(result.final_response)</code></pre>
+			</figure>
+			<figure class="code">
+				<figcaption><span>codex-rs/rust-toolchain.toml</span><span class="lines">toml</span></figcaption>
+				<pre><code class="language-toml">[toolchain]
+channel = "1.95.0"
+components = ["clippy", "rustfmt", "rust-src"]</code></pre>
+			</figure>
+
+			<h2>Long lines (must scroll inside the block, not the page)</h2>
+			<figure class="code">
+				<figcaption><span class="lines">the checker caps these at 96 chars</span></figcaption>
+				<pre><code class="language-rust">pub type TimeFuture&lt;'a&gt; = Pin&lt;Box&lt;dyn Future&lt;Output = Result&lt;DateTime&lt;Utc&gt;&gt;&gt; + Send + 'a&gt;&gt;;</code></pre>
+			</figure>
+
+			<h2>Walkthrough (annotated code)</h2>
+			<div class="walkthrough">
+				<figure class="code">
+					<figcaption><span>codex-rs/core/src/session/turn.rs</span><span class="lines">the loop</span></figcaption>
+					<pre><code class="language-rust">loop {
+    run_sampling_request(/* … */).await;
+    let needs_follow_up = model_needs_follow_up || has_pending_input;
+    if !needs_follow_up {
+        break;
+    }
+}</code></pre>
+				</figure>
+				<p class="anno">
+					The agent loop: call the model, and if the result needs following up — because
+					it asked for a tool, or because you typed something — go round again.
+				</p>
+				<figure class="code">
+					<pre><code class="language-rust">let Ok(native_cwd) = cwd.to_abs_path() else {
+    return false;
+};</code></pre>
+				</figure>
+				<p class="anno">
+					A second figure in the same walkthrough, without a caption. Failing closed:
+					if the directory cannot be resolved, the answer is "not writable".
+				</p>
+			</div>
+
+			<h2>Callouts</h2>
+			<div class="callout note">
+				<span class="callout-label">Note</span>
+				<p>A clarifying remark that would derail the main text.</p>
+			</div>
+			<div class="callout warn">
+				<span class="callout-label">Careful</span>
+				<p>A pitfall, or a place where the code is subtler than it looks.</p>
+			</div>
+			<div class="callout deeper">
+				<span class="callout-label">Go deeper (optional)</span>
+				<p>
+					Extra depth for the curious, with nothing later depending on it.
+				</p>
+			</div>
+
+			<h2>Digression</h2>
+			<details class="digression">
+				<summary>Why is there a Bazel build as well as Cargo?</summary>
+				<div class="digression-body">
+					<p>
+						Collapsed by default; purely optional depth. Native
+						<code>&lt;details&gt;</code>, zero JavaScript, and a 44px tap target.
+					</p>
+				</div>
+			</details>
+
+			<h2>Box diagram (stacks vertically under 640px)</h2>
+			<figure class="diagram">
+				<div class="drow keep-row">
+					<div class="dbox"><span class="dbox-title">tui</span><span class="dbox-sub">terminal</span></div>
+					<div class="dbox"><span class="dbox-title">exec</span><span class="dbox-sub">scripted</span></div>
+				</div>
+				<span class="darrow">↓ <span class="dlabel">ClientRequest</span></span>
+				<div class="drow">
+					<div class="dbox"><span class="dbox-title">app-server</span><span class="dbox-sub">in-process or remote</span></div>
+					<span class="darrow">→</span>
+					<div class="dbox accent"><span class="dbox-title">core</span><span class="dbox-sub">the agent</span></div>
+					<span class="darrow">→</span>
+					<div class="dbox faded"><span class="dbox-title">v8-poc</span><span class="dbox-sub">experimental</span></div>
+				</div>
+				<figcaption class="dcaption">
+					Rows marked <code>keep-row</code> stay side-by-side on narrow screens; plain
+					rows stack and rotate their arrows.
+				</figcaption>
+			</figure>
+
+			<h2>Inline SVG diagram</h2>
+			<figure class="svg-diagram">
+				<svg viewBox="0 0 520 120" role="img" aria-label="Example flow">
+					<defs>
+						<marker id="arr" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+							<path d="M0,0 L10,5 L0,10 z" fill="currentColor" opacity="0.55"/>
+						</marker>
+					</defs>
+					<g fill="none" stroke="currentColor" stroke-opacity="0.5">
+						<rect x="10" y="35" width="130" height="50" rx="8"/>
+						<rect x="195" y="35" width="130" height="50" rx="8"/>
+						<rect x="380" y="35" width="130" height="50" rx="8"/>
+						<line x1="140" y1="60" x2="193" y2="60" marker-end="url(#arr)"/>
+						<line x1="325" y1="60" x2="378" y2="60" marker-end="url(#arr)"/>
+					</g>
+					<g fill="currentColor" font-size="13" text-anchor="middle">
+						<text x="75" y="65">prompt</text>
+						<text x="260" y="65">model</text>
+						<text x="445" y="65">tool calls</text>
+					</g>
+				</svg>
+				<figcaption>
+					SVG uses <code>currentColor</code> so it adapts to both themes, and carries a
+					<code>viewBox</code> with no fixed width so it scales on a phone.
+				</figcaption>
+			</figure>
+
+			<footer class="site-footer">
+				Styleguide — not part of the course, and deliberately absent from
+				<code>manifest.js</code>.
+			</footer>
+		</article>
+	</div>
+	<script src="assets/vendor/highlight.min.js"></script>
+	<script>hljs.highlightAll();</script>
+</body>
+</html>

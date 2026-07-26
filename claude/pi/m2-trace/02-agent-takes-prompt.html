@@ -1,0 +1,178 @@
+<!doctype html>
+<html lang="en">
+<head>
+	<meta charset="utf-8">
+	<meta name="viewport" content="width=device-width, initial-scale=1">
+	<title>The Agent takes your prompt · pi · Codebase Academy</title>
+	<link rel="stylesheet" href="../assets/css/site.css">
+</head>
+<body>
+	<article class="lesson">
+		<h1>The Agent takes your prompt</h1>
+		<p class="lede">
+			Your string has passed through the session wrapper and reached the
+			<code>Agent</code> class in <code>pi-agent-core</code>. Here it stops being
+			a string: it becomes a <em>message</em>, joins a conversation, and a run
+			begins. This lesson introduces the two data shapes the entire system
+			revolves around — messages and events.
+		</p>
+
+		<h2>From string to message</h2>
+		<p>
+			The Agent's <code>prompt</code> method accepts a bare string and
+			immediately dresses it up:
+		</p>
+
+		<figure class="code">
+			<figcaption><span>packages/agent/src/agent.ts</span><span class="lines">prompt + normalizePromptInput, abridged</span></figcaption>
+			<pre><code class="language-typescript">async prompt(input: string | AgentMessage | AgentMessage[], images?: ImageContent[]): Promise&lt;void&gt; {
+	if (this.activeRun) {
+		throw new Error(
+			"Agent is already processing a prompt. Use steer() or followUp() to queue messages, ...",
+		);
+	}
+	const messages = this.normalizePromptInput(input, images);
+	await this.runPromptMessages(messages);
+}
+
+private normalizePromptInput(input, images): AgentMessage[] {
+	// ...arrays and ready-made messages pass through; a string becomes:
+	const content: Array&lt;TextContent | ImageContent&gt; = [{ type: "text", text: input }];
+	if (images && images.length > 0) content.push(...images);
+	return [{ role: "user", content, timestamp: Date.now() }];
+}</code></pre>
+		</figure>
+
+		<p>So your input is now this JSON-shaped object:</p>
+		<figure class="code">
+			<figcaption><span>in memory</span><span class="lines">your message, as data</span></figcaption>
+			<pre><code class="language-json">{
+	"role": "user",
+	"content": [{ "type": "text", "text": "what does package.json do?" }],
+	"timestamp": 1751629200000
+}</code></pre>
+		</figure>
+
+		<aside class="concept" data-kind="llm">
+			<p class="concept-label">LLM · Messages, roles, and the conversation-as-list</p>
+			<p>
+				Every modern LLM API sees a conversation the same way: <strong>a list of
+				messages</strong>, each tagged with a <em>role</em>. <code>user</code>
+				messages are yours; <code>assistant</code> messages are the model's;
+				tool results get a role of their own. The model itself is stateless —
+				it remembers nothing between calls. Each time you "continue" a
+				conversation, the client sends the <em>entire list again</em> and the
+				model predicts what an assistant would say next.
+			</p>
+			<p>
+				Grasp that and several mysteries dissolve at once: why long chats get
+				slow and expensive (the list grows), why "context windows" run out
+				(the list has a maximum size), and why pi will later need
+				<em>compaction</em> (Module 7) to shrink the list gracefully. The
+				conversation is just an array — and pi's whole job is curating what's
+				in it. Note <code>content</code> is itself a list of typed blocks
+				(text, images…) rather than one string; that structure pays off two
+				lessons from now.
+			</p>
+		</aside>
+
+		<p>
+			Also note what <code>prompt()</code> does if a run is already active:
+			it refuses, pointing you at <code>steer()</code> and <code>followUp()</code> —
+			queues for injecting messages into a <em>running</em> agent. File that
+			away; it's how typing while pi is working actually works (Module 5).
+		</p>
+
+		<h2>How the UI finds out: events</h2>
+		<p>
+			<code>prompt()</code> starts the loop (next lesson), but notice the return
+			type: <code>Promise&lt;void&gt;</code>. It hands back <em>nothing</em>. The
+			screen can't be updated from a return value that doesn't exist — so how
+			does the UI know what's happening? It <strong>subscribes</strong>. Anyone
+			can register a listener, and the Agent narrates its life as a stream of
+			typed events:
+		</p>
+
+		<figure class="code wide">
+			<figcaption><span>packages/agent/src/types.ts</span><span class="lines">the AgentEvent union, verbatim</span></figcaption>
+			<pre><code class="language-typescript">export type AgentEvent =
+	// Agent lifecycle
+	| { type: "agent_start" }
+	| { type: "agent_end"; messages: AgentMessage[] }
+	// Turn lifecycle - a turn is one assistant response + any tool calls/results
+	| { type: "turn_start" }
+	| { type: "turn_end"; message: AgentMessage; toolResults: ToolResultMessage[] }
+	// Message lifecycle - emitted for user, assistant, and toolResult messages
+	| { type: "message_start"; message: AgentMessage }
+	// Only emitted for assistant messages during streaming
+	| { type: "message_update"; message: AgentMessage; assistantMessageEvent: AssistantMessageEvent }
+	| { type: "message_end"; message: AgentMessage }
+	// Tool execution lifecycle
+	| { type: "tool_execution_start"; toolCallId: string; toolName: string; args: any }
+	| { type: "tool_execution_update"; toolCallId: string; toolName: string; args: any; partialResult: any }
+	| { type: "tool_execution_end"; toolCallId: string; toolName: string; result: any; isError: boolean };</code></pre>
+		</figure>
+
+		<p>
+			Read it as a radio broadcast schedule: a run starts
+			(<code>agent_start</code>), then for each turn you hear the assistant's
+			message being born (<code>message_start</code>), growing word by word
+			(<code>message_update</code>), finishing (<code>message_end</code>), tools
+			running (<code>tool_execution_*</code>), the turn closing
+			(<code>turn_end</code>) — until <code>agent_end</code> signs off. The
+			interactive UI is one subscriber. The session's disk-writer is another.
+			They don't know about each other.
+		</p>
+
+		<aside class="concept" data-kind="ts">
+			<p class="concept-label">TypeScript · Discriminated unions</p>
+			<p>
+				That <code>AgentEvent</code> type is a <strong>discriminated union</strong>:
+				a set of alternative object shapes, each carrying a literal
+				<code>type</code> field (the <em>discriminant</em>) that says which
+				shape it is. The pipe <code>|</code> means "one of these."
+			</p>
+			<p>
+				The magic is in how you consume one. Write
+				<code>switch (event.type)</code> and inside
+				<code>case "turn_end":</code> the compiler <em>knows</em>
+				<code>event</code> has a <code>toolResults</code> field — and that it
+				doesn't in <code>case "agent_start":</code>. Python's closest analogue
+				is <code>match</code> over a union of dataclasses, but here the
+				narrowing is compile-time-checked: touch a field that doesn't exist in
+				that branch and the build fails. This is <em>the</em> idiom of this
+				codebase. Messages, streaming chunks, session entries, UI events — all
+				discriminated unions. Learn to read one and you can read half of pi.
+			</p>
+		</aside>
+
+		<h2>The picture so far</h2>
+		<figure class="diagram">
+			<div class="drow">
+				<div class="dbox"><span class="dbox-title">"what does package.json do?"</span><span class="dbox-sub">string</span></div>
+				<span class="darrow">→</span>
+				<div class="dbox"><span class="dbox-title">{ role: "user", ... }</span><span class="dbox-sub">message</span></div>
+				<span class="darrow">→</span>
+				<div class="dbox accent"><span class="dbox-title">Agent</span><span class="dbox-sub">appends to conversation, starts run</span></div>
+			</div>
+			<span class="darrow">↓ <span class="dlabel">broadcasts AgentEvents to all subscribers</span></span>
+			<div class="drow">
+				<div class="dbox"><span class="dbox-title">UI</span><span class="dbox-sub">repaints screen</span></div>
+				<div class="dbox"><span class="dbox-title">Session</span><span class="dbox-sub">writes to disk</span></div>
+				<div class="dbox faded"><span class="dbox-title">Extensions</span><span class="dbox-sub">Module 8</span></div>
+			</div>
+		</figure>
+
+		<h2>What you now know</h2>
+		<p>
+			Your words are now a <code>user</code> message in an in-memory conversation
+			list, and every downstream consumer — screen, disk, plugins — watches the
+			run through one broadcast channel of discriminated-union events. Next: the
+			run itself. The loop turns.
+		</p>
+	</article>
+	<script src="../manifest.js"></script>
+	<script src="../assets/vendor/highlight.min.js"></script>
+	<script src="../assets/js/app.js" defer></script>
+</body>
+</html>

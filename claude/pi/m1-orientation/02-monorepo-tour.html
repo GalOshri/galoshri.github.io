@@ -1,0 +1,213 @@
+<!doctype html>
+<html lang="en">
+<head>
+	<meta charset="utf-8">
+	<meta name="viewport" content="width=device-width, initial-scale=1">
+	<title>A tour of the monorepo · pi · Codebase Academy</title>
+	<link rel="stylesheet" href="../assets/css/site.css">
+</head>
+<body>
+	<article class="lesson">
+		<h1>A tour of the monorepo</h1>
+		<p class="lede">
+			pi's source is one Git repository containing five separately published
+			packages. Before reading any code, it pays to know where everything lives
+			and how the pieces are stitched together — because that stitching is itself
+			a big-codebase skill.
+		</p>
+
+		<h2>One repo, five packages</h2>
+		<p>
+			Open the repository root and you see a thin shell — configuration, scripts,
+			docs — around a single important directory: <code>packages/</code>.
+		</p>
+
+		<figure class="code">
+			<figcaption><span>repository root</span><span class="lines">abridged</span></figcaption>
+			<pre><code class="language-text">pi/
+├── package.json          ← the "workspace root": scripts + package list
+├── package-lock.json     ← exact versions of every dependency
+├── tsconfig.base.json    ← shared TypeScript compiler settings
+├── biome.json            ← linter/formatter configuration
+├── AGENTS.md             ← the project's rules (for humans AND AI agents)
+├── scripts/              ← release & maintenance tooling
+└── packages/
+    ├── tui/              ← terminal UI library          (~12,000 lines)
+    ├── ai/               ← unified LLM API              (~36,000 lines)
+    ├── agent/            ← the agent loop & state       (~8,000 lines)
+    ├── coding-agent/     ← the actual `pi` program      (~51,000 lines)
+    └── orchestrator/     ← multi-agent supervisor, experimental (~2,000 lines)</code></pre>
+		</figure>
+
+		<p>
+			This arrangement is called a <strong>monorepo</strong>: multiple packages,
+			versioned and developed together in one repository, but published to the
+			npm registry as five independent installable units. Someone who only wants
+			the LLM API can <code>npm install @earendil-works/pi-ai</code> and never
+			touch the rest.
+		</p>
+
+		<aside class="concept" data-kind="node">
+			<p class="concept-label">Node.js · package.json and npm workspaces</p>
+			<p>
+				Every Node package has a <code>package.json</code> — the equivalent of
+				Python's <code>pyproject.toml</code>. It declares the package's name,
+				version, dependencies, and runnable scripts
+				(<code>npm run build</code> ≈ a Makefile target).
+			</p>
+			<p>
+				A <strong>workspace</strong> root is a <code>package.json</code> with a
+				<code>"workspaces"</code> list. Running <code>npm install</code> there
+				installs dependencies for <em>all</em> listed packages at once and —
+				crucially — symlinks the sibling packages into each other. When
+				<code>coding-agent</code> imports <code>@earendil-works/pi-ai</code>, npm
+				resolves it to the local <code>packages/ai</code> folder, not the
+				registry. Edit the library, and the app sees it immediately. Python's
+				closest analogue is <code>pip install -e</code> for several local
+				packages, or uv workspaces.
+			</p>
+		</aside>
+
+		<figure class="code">
+			<figcaption><span>package.json</span><span class="lines">root, abridged</span></figcaption>
+			<pre><code class="language-json">{
+	"name": "pi-monorepo",
+	"private": true,
+	"type": "module",
+	"workspaces": [
+		"packages/*",
+		"packages/coding-agent/examples/extensions/with-deps"
+	],
+	"scripts": {
+		"build": "cd packages/tui && npm run build && cd ../ai && npm run build && cd ../agent && npm run build && cd ../coding-agent && npm run build && cd ../orchestrator && npm run build",
+		"test": "npm run test --workspaces --if-present"
+	}
+}</code></pre>
+		</figure>
+
+		<p>
+			Two details in that file are worth savoring. First,
+			<code>"private": true</code> — the root itself is never published; it exists
+			only to coordinate. Second, look at the <code>build</code> script: no clever
+			build orchestrator, just <code>cd</code> into each package in a fixed order
+			and build it. The order is not arbitrary — it is exactly the dependency
+			order, leaves first:
+		</p>
+
+		<figure class="diagram">
+			<div class="drow">
+				<div class="dbox"><span class="dbox-title">1. tui</span><span class="dbox-sub">depends on nothing internal</span></div>
+				<div class="dbox"><span class="dbox-title">2. ai</span><span class="dbox-sub">depends on nothing internal</span></div>
+			</div>
+			<span class="darrow">↓</span>
+			<div class="drow">
+				<div class="dbox"><span class="dbox-title">3. agent</span><span class="dbox-sub">needs ai</span></div>
+			</div>
+			<span class="darrow">↓</span>
+			<div class="drow">
+				<div class="dbox accent"><span class="dbox-title">4. coding-agent</span><span class="dbox-sub">needs tui + ai + agent</span></div>
+			</div>
+			<span class="darrow">↓</span>
+			<div class="drow">
+				<div class="dbox faded"><span class="dbox-title">5. orchestrator</span><span class="dbox-sub">needs coding-agent</span></div>
+			</div>
+			<figcaption class="dcaption">Build order = dependency order. You can't compile a package before the packages it imports.</figcaption>
+		</figure>
+
+		<h2>Anatomy of one package</h2>
+		<p>
+			Each of the five packages repeats the same internal pattern. Here is the
+			agent package's manifest, abridged:
+		</p>
+
+		<figure class="code">
+			<figcaption><span>packages/agent/package.json</span><span class="lines">abridged</span></figcaption>
+			<pre><code class="language-json">{
+	"name": "@earendil-works/pi-agent-core",
+	"version": "0.80.3",
+	"type": "module",
+	"main": "./dist/index.js",
+	"types": "./dist/index.d.ts",
+	"scripts": {
+		"build": "tsgo -p tsconfig.build.json",
+		"test": "vitest --run"
+	},
+	"dependencies": {
+		"@earendil-works/pi-ai": "^0.80.3",
+		"ignore": "7.0.5",
+		"typebox": "1.1.38",
+		"yaml": "2.9.0"
+	},
+	"engines": { "node": ">=22.19.0" }
+}</code></pre>
+		</figure>
+
+		<p>Read it like a checklist:</p>
+		<ul>
+			<li>
+				<strong>Name and version.</strong> The <code>@earendil-works/</code>
+				prefix is an npm <em>scope</em> — a namespace, like a GitHub org. Notice
+				the version: <code>0.80.3</code>. Every package in the repo carries the
+				<em>same</em> version, bumped together on every release ("lockstep
+				versioning"). It sacrifices per-package version meaning for a huge
+				simplification: any combination of pi packages with matching versions is
+				known to work together.
+			</li>
+			<li>
+				<strong>Source vs. build output.</strong> TypeScript in
+				<code>src/</code> is compiled to plain JavaScript in <code>dist/</code>,
+				and <code>"main"</code> points consumers at the compiled output. You read
+				<code>src/</code>; Node runs <code>dist/</code>.
+			</li>
+			<li>
+				<strong>Dependencies.</strong> The internal dependency
+				(<code>pi-ai</code>) tracks the lockstep version. The three external ones
+				are pinned to <em>exact</em> versions — no <code>^</code>, no ranges.
+				That's a deliberate security posture we'll dig into in lesson 5.
+			</li>
+			<li>
+				<strong>Only three external dependencies.</strong> For a package this
+				central, that is strikingly few. pi builds most things itself — which is
+				precisely why it's such a good codebase to learn from.
+			</li>
+		</ul>
+
+		<h2>Where the interesting code lives</h2>
+		<p>A cheat sheet you'll come back to. Sizes are orders of magnitude, not gospel:</p>
+		<table>
+			<thead><tr><th>Package</th><th>npm name</th><th>What's inside</th><th>Course modules</th></tr></thead>
+			<tbody>
+				<tr><td><code>packages/ai</code></td><td><code>pi-ai</code></td><td>Message &amp; tool types, streaming, one adapter per provider wire-format, model catalog (~18k lines of it generated)</td><td>3–4</td></tr>
+				<tr><td><code>packages/agent</code></td><td><code>pi-agent-core</code></td><td>The agent loop, agent state &amp; events, an optional "harness" layer</td><td>5</td></tr>
+				<tr><td><code>packages/coding-agent</code></td><td><code>pi-coding-agent</code></td><td>The <code>pi</code> CLI: startup, four run modes, seven tools, sessions, compaction, extensions, system prompt</td><td>6–8</td></tr>
+				<tr><td><code>packages/tui</code></td><td><code>pi-tui</code></td><td>Terminal UI: components, differential renderer, keyboard protocols, editor</td><td>9</td></tr>
+				<tr><td><code>packages/orchestrator</code></td><td><code>pi-orchestrator</code></td><td>Experimental: run and supervise many pi processes</td><td>10</td></tr>
+			</tbody>
+		</table>
+
+		<div class="callout note">
+			<span class="callout-label">Note · a young, fast-moving repo</span>
+			<p>
+				pi's git history shows intense, recent activity — dozens of commits in
+				the last two weeks alone, mostly scoped fixes like
+				<code>fix(ai): …</code> and <code>fix(coding-agent): …</code>. The
+				<em>architecture</em> you'll learn here is stable; individual line
+				numbers drift week to week. That's why every excerpt in this course is
+				embedded in the lesson itself: the teaching stays valid even as the code
+				moves.
+			</p>
+		</div>
+
+		<h2>What you now know</h2>
+		<p>
+			A monorepo is not a pile of code; it's a dependency graph made visible. pi's
+			graph is a straight line — tui and ai at the bottom, the product at the top —
+			and that single fact will organize everything else you learn about it.
+			Next: the language all of this is written in, decoded for Python eyes.
+		</p>
+	</article>
+	<script src="../manifest.js"></script>
+	<script src="../assets/vendor/highlight.min.js"></script>
+	<script src="../assets/js/app.js" defer></script>
+</body>
+</html>

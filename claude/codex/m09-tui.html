@@ -1,0 +1,371 @@
+<!doctype html>
+<html lang="en">
+<head>
+	<meta charset="utf-8">
+	<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+	<meta name="color-scheme" content="light dark">
+	<title>tui/ — The Terminal Interface · Codex Explainer</title>
+	<link rel="stylesheet" href="assets/css/site.css">
+</head>
+<body>
+	<article class="lesson" data-module="m09-tui.html">
+		<h1>tui/ — The Terminal Interface</h1>
+		<p class="lede">
+			At ~200,000 lines across 134 top-level entries, <code>tui</code> is the largest
+			crate in the repository — bigger than the agent it drives. That ratio is not a
+			mistake. Everything you have read so far is invisible; this is the only part
+			anyone sees, and a terminal gives you nothing for free.
+		</p>
+
+		<section class="lesson-section" id="ratatui" data-minutes="8">
+			<h2>ratatui and the app shell</h2>
+
+			<p>
+				Codex builds on <strong>ratatui</strong>, the standard Rust library for terminal
+				UIs. Ratatui is immediate-mode: you do not create widget objects that persist,
+				you re-describe the entire screen every frame and the library works out which
+				characters changed.
+			</p>
+
+			<aside class="concept" data-kind="os">
+				<p class="concept-label">Terminal · What you actually control</p>
+				<p>
+					A terminal is a grid of cells, each holding one character plus attributes
+					(bold, dim, a colour index). You change it by writing escape sequences —
+					<code>\x1b[2J</code> clears, <code>\x1b[10;5H</code> moves the cursor. There
+					are no widgets, no layout engine, no event objects, and no pixels. Anything
+					that looks like a scrollable transcript with a text box at the bottom was
+					built by someone, by hand, out of characters.
+				</p>
+			</aside>
+
+			<p>
+				Codex does not use ratatui's terminal wrapper unmodified. It forked it:
+			</p>
+
+			<figure class="code">
+				<figcaption><span>codex-rs/tui/src/custom_terminal.rs</span><span class="lines">the opening comment</span></figcaption>
+				<pre><code class="language-rust">// This is derived from `ratatui::Terminal`, which is licensed under the
+// following terms:
+//
+// The MIT License (MIT)
+// Copyright (c) 2016-2022 Florian Dehau
+// Copyright (c) 2023-2025 The Ratatui Developers</code></pre>
+			</figure>
+
+			<p>
+				Vendoring a dependency's core type is a serious decision, and the reason is
+				Codex's most distinctive UI behaviour: it does <em>not</em> take over your
+				whole terminal. Conversation history scrolls into your real scrollback, where
+				you can select it, copy it, and still see it after Codex exits. Only the bottom
+				few lines are managed. Standard full-screen terminal apps use an "alternate
+				screen" that vanishes on exit; keeping the transcript in normal scrollback while
+				still drawing a live UI below it requires cursor and viewport control that
+				ratatui's <code>Terminal</code> does not expose.
+			</p>
+
+			<div class="callout note">
+				<span class="callout-label">Note</span>
+				<p>
+					The licence text is retained in full at the top of the file. If you are ever
+					tempted to copy a chunk of a dependency into your own tree, this is how to do
+					it — attribution intact, provenance obvious to the next reader.
+				</p>
+			</div>
+		</section>
+
+		<section class="lesson-section" id="event-loop" data-minutes="9">
+			<h2>The event loop</h2>
+
+			<p>
+				A terminal app is a loop over events from several sources at once: your
+				keystrokes, the agent's notifications, terminal resizes, timers.
+				<code>AppEvent</code> is the union of everything that can wake the UI:
+			</p>
+
+			<figure class="code">
+				<figcaption><span>codex-rs/tui/src/app_event.rs</span><span class="lines">AppEvent, selected variants</span></figcaption>
+				<pre><code class="language-rust">pub(crate) enum AppEvent {
+    /// Open the agent picker for switching active threads.
+    OpenAgentPicker,
+    /// Switch the active thread to the selected agent.
+    SelectAgentThread(ThreadId),
+
+    /// Fork the current thread into a transient side conversation.
+    StartSide {
+        parent_thread_id: ThreadId,
+        user_message: Option&lt;UserMessage&gt;,
+    },
+
+    /// Submit an op to the specified thread, regardless of current focus.
+    SubmitThreadOp {
+        thread_id: ThreadId,
+        op: AppCommand,
+    },
+
+    /// Interrupt, fork, and retry a safety-buffered turn with the
+    /// server-selected model.
+    RetrySafetyBufferedTurn {
+        thread_id: ThreadId,
+        turn_id: String,
+        model: String,
+        turn: AppCommand,
+        prompt: UserMessage,
+    },
+}</code></pre>
+			</figure>
+
+			<p>
+				Notice that almost every variant carries a <code>ThreadId</code>. The TUI is not
+				a single-conversation program — it manages several threads at once, with a
+				picker to switch between them, and "submit to this thread regardless of current
+				focus" as an explicit capability. Module&nbsp;5's <code>ThreadManager</code>
+				exists because of screens like this.
+			</p>
+
+			<p>
+				<code>RetrySafetyBufferedTurn</code> is a good example of how much product logic
+				lives up here. Recall <code>ResponseEvent::SafetyBuffering</code> from
+				Module&nbsp;6 — the server withholding output pending a check. The UI's response
+				is a compound operation: interrupt the turn, fork the thread so the original is
+				preserved, and retry with the model the server suggested. Three core operations
+				behind one user gesture.
+			</p>
+
+			<aside class="concept" data-kind="eng">
+				<p class="concept-label">Engineering · Why an event enum rather than callbacks</p>
+				<p>
+					Every asynchronous source — keyboard, agent, timer — converts its input into
+					one <code>AppEvent</code> and pushes it onto a channel. One loop drains that
+					channel and mutates state in one place. This is the same submission-queue
+					discipline as <code>Op</code> in Module&nbsp;4, and it buys the same thing:
+					ordering is well-defined, state changes are serialised, and the whole
+					application can be tested by feeding it a list of events. It is why
+					<code>app_event_sender.rs</code> exists as its own module — the sending half
+					is handed out to anything that needs to speak.
+				</p>
+			</aside>
+		</section>
+
+		<section class="lesson-section" id="transcript" data-minutes="8">
+			<h2>The chat transcript</h2>
+
+			<p>
+				<code>chatwidget</code> — a file <em>and</em> a directory — owns the
+				conversation view. Its job is to turn the event stream from Module&nbsp;4 into
+				rendered cells, incrementally, while text is still arriving.
+			</p>
+
+			<p>
+				The hard part is that terminal rendering is line-based and streaming text is
+				not. A Markdown code fence is only recognisable once you have seen its closing
+				backticks, but you must display something now. Hence the neighbouring modules:
+				<code>markdown.rs</code>, <code>markdown_stream.rs</code>,
+				<code>markdown_render.rs</code>, <code>streaming</code>, and
+				<code>live_wrap.rs</code>.
+			</p>
+
+			<p>
+				Diffs get their own pipeline too — <code>diff_render.rs</code>,
+				<code>diff_model.rs</code>, <code>get_git_diff.rs</code> — because
+				Module&nbsp;7's <code>apply_patch</code> results need to be shown as coloured
+				diffs, and the streaming parser means they can be shown while the model is still
+				writing them.
+			</p>
+
+			<p>
+				Command output has a dedicated <code>exec_cell</code> module: a command that
+				runs for two minutes and prints ten thousand lines cannot simply be appended, so
+				it is rendered as a collapsible cell that fills in live. That is the
+				<code>ExecCommandBegin</code>/<code>OutputDelta</code>/<code>End</code>
+				triple from Module&nbsp;4 arriving at its destination.
+			</p>
+
+			<div class="callout deeper">
+				<span class="callout-label">Go deeper (optional)</span>
+				<p>
+					<code>ascii_animation.rs</code>, <code>frames.rs</code>, and
+					<code>shimmer.rs</code> are the spinner and the "thinking" shimmer. They look
+					like frivolity in a codebase this serious, but a turn can run for minutes and
+					an interface that appears frozen is a bug report. Feedback under latency is
+					a feature.
+				</p>
+			</div>
+		</section>
+
+		<section class="lesson-section" id="composer" data-minutes="9">
+			<h2>The composer</h2>
+
+			<p>
+				<code>bottom_pane/</code> is where you type, and it is the densest part of the
+				crate — dense enough that it has <em>its own</em> <code>AGENTS.md</code>:
+			</p>
+
+			<figure class="code">
+				<figcaption><span class="lines">codex-rs/tui/src/bottom_pane/ — selected entries</span></figcaption>
+				<pre><code class="language-plaintext">AGENTS.md
+approval_overlay.rs
+bottom_pane_view.rs
+chat_composer.rs
+chat_composer_history.rs
+command_popup.rs
+custom_prompt_view.rs
+experimental_features_view.rs
+feedback_view.rs
+app_link_view.rs
+effort_ignition.rs
+effort_status_line.rs</code></pre>
+			</figure>
+
+			<p>
+				Writing a text editor is genuinely hard, and a terminal one is harder. Cursor
+				movement through wrapped lines, multi-line input where <kbd>Enter</kbd>
+				sometimes submits and sometimes inserts a newline, history you can scroll back
+				through, paste of a hundred lines arriving as a hundred keystrokes, and
+				Unicode where one character can be two cells wide.
+			</p>
+
+			<p>
+				<code>chat_composer_history.rs</code> is worth singling out. Shell-style history
+				sounds trivial until you consider that you may have edited the current draft
+				before pressing Up — so the draft has to be preserved, restored on the way back
+				down, and not confused with a recalled entry.
+			</p>
+
+			<p>
+				<code>command_popup.rs</code> is slash-command completion. Typing
+				<code>/</code> opens a filtered list — the same interaction as an IDE
+				autocomplete, implemented from scratch over a character grid. Alongside it,
+				<code>file_search.rs</code> backs <code>@</code>-mentions of files, powered by
+				the <code class="path">codex-rs/file-search</code> crate.
+			</p>
+
+			<p>
+				And <code>external_editor.rs</code> is the humane escape hatch: give up, open
+				<code>$EDITOR</code>, read the file back when it exits.
+			</p>
+		</section>
+
+		<section class="lesson-section" id="approvals-diffs" data-minutes="8">
+			<h2>Approvals and diffs</h2>
+
+			<p>
+				Module&nbsp;8 ended with <code>SafetyCheck::AskUser</code> and an event going
+				out on the queue. <code>approval_overlay.rs</code> is where that lands.
+			</p>
+
+			<p>
+				This is the highest-stakes UI in the product. The user is making a security
+				decision, usually quickly, often repeatedly, and the interface has to convey
+				enough for that decision to be meaningful — what command, in which directory,
+				with what sandbox, and why approval is being requested at all. The supporting
+				files (<code>approval_events.rs</code>,
+				<code>app_server_approval_conversions.rs</code>,
+				<code>auto_review_denials.rs</code>) exist because an approval is not one
+				message but a small protocol: request, decision, remembered scope, and what
+				happens to the queued work if you say no.
+			</p>
+
+			<aside class="concept" data-kind="eng">
+				<p class="concept-label">Engineering · Approval fatigue is a security bug</p>
+				<p>
+					If a tool asks fifty times an hour, users stop reading and approve
+					reflexively — at which point the prompt provides no protection while still
+					costing attention. That is why Module&nbsp;8's design puts so much weight on
+					<em>not</em> needing to ask: a good sandbox means auto-approval is safe, and
+					every avoided prompt makes the remaining ones more likely to be read. The
+					granular approval config exists so you can turn off whole categories you have
+					decided you do not want to be asked about.
+				</p>
+			</aside>
+		</section>
+
+		<section class="lesson-section" id="slash-themes" data-minutes="8">
+			<h2>Slash commands, themes, onboarding</h2>
+
+			<p>
+				The crate ships a style guide, and it closes a loop opened in Module&nbsp;1:
+			</p>
+
+			<figure class="code">
+				<figcaption><span>codex-rs/tui/styles.md</span><span class="lines">abridged</span></figcaption>
+				<pre><code class="language-markdown"># Foreground colors
+
+- **Default:** Most of the time, just use the default foreground color.
+- **User input tips, selection, and status indicators:** Use ANSI `cyan`.
+- **Success and additions:** Use ANSI `green`.
+- **Errors, failures and deletions:** Use ANSI `red`.
+- **Codex:** Use ANSI `magenta`.
+
+# Avoid
+
+- Avoid custom colors because there's no guarantee that they'll contrast well
+  or look good in various terminal color themes.
+- Avoid ANSI `black` & `white` as foreground colors because the default
+  terminal theme color will do a better job.
+- Avoid ANSI `blue` and `yellow` because for now the style guide doesn't use them.
+
+(There are some rules to try to catch this in `clippy.toml`.)</code></pre>
+			</figure>
+
+			<p>
+				That last line is the payoff. Recall the <code>disallowed-methods</code> list
+				from Module&nbsp;1 — <code>Color::Rgb</code>, <code>Stylize::white</code>,
+				<code>Stylize::yellow</code>, each with a terse reason. This document is where
+				those reasons come from, and the linter is how a design decision written in
+				Markdown becomes something a compiler enforces.
+			</p>
+
+			<aside class="concept" data-kind="os">
+				<p class="concept-label">Terminal · Why ANSI colours, not RGB</p>
+				<p>
+					The sixteen ANSI colours are <em>names</em>, not values —
+					<code>red</code> means "whatever this user's theme calls red". Every terminal
+					theme is designed so those sixteen are legible against its background. A
+					hard-coded <code>#1a1a1a</code> looks right in exactly one theme and becomes
+					invisible in others. Deferring to the user's palette is both an accessibility
+					choice and the only way to look correct everywhere.
+				</p>
+			</aside>
+
+			<p>
+				<code>onboarding/</code> handles first run: sign-in, trusting a directory,
+				choosing an approval mode. It is also where the two-front-doors design from
+				Module&nbsp;6 surfaces — the flow differs depending on whether Codex owns your
+				credentials or a host application supplied them.
+			</p>
+
+			<p>
+				The migration modules are an unusual find:
+				<code>external_agent_config_migration*.rs</code>, five files, plus the
+				<code class="path">codex-rs/external-agent-migration</code> crate (~14,000
+				lines). This is machinery for importing configuration from <em>competing</em>
+				coding agents. Nothing about it is technically deep; it is here because it
+				tells you what the product is trying to be.
+			</p>
+
+			<h3>What you now know</h3>
+
+			<p>
+				<code>tui</code> is larger than the agent because terminals give you a character
+				grid and nothing else. Codex vendored ratatui's <code>Terminal</code> so the
+				transcript can live in your real scrollback instead of an alternate screen. One
+				<code>AppEvent</code> enum funnels every input source into a single loop, with
+				thread ids on almost every variant because the UI is multi-conversation.
+				Streaming Markdown, live diffs, and collapsible command output each need their
+				own pipeline. The composer is a hand-written text editor with history,
+				completion, and an <code>$EDITOR</code> escape hatch. Approvals are the
+				highest-stakes screen in the product. And a Markdown style guide, enforced by
+				<code>clippy.toml</code>, keeps it legible in every terminal theme.
+			</p>
+
+			<p>
+				This was one front door. Next: all the others.
+			</p>
+		</section>
+	</article>
+	<script src="manifest.js"></script>
+	<script src="assets/vendor/highlight.min.js"></script>
+	<script src="assets/js/app.js" defer></script>
+</body>
+</html>

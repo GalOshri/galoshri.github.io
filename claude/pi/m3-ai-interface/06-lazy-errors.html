@@ -1,0 +1,157 @@
+<!doctype html>
+<html lang="en">
+<head>
+	<meta charset="utf-8">
+	<meta name="viewport" content="width=device-width, initial-scale=1">
+	<title>lazy.ts: errors become events · pi · Codebase Academy</title>
+	<link rel="stylesheet" href="../assets/css/site.css">
+</head>
+<body>
+	<article class="lesson">
+		<h1>lazy.ts: errors become events</h1>
+		<p class="lede">
+			Seventy lines that encode <code>pi-ai</code>'s sternest design rule:
+			<strong>once you ask for a stream, nothing throws — ever.</strong> Auth
+			failure, missing module, dead network: all of it arrives as a normal
+			<code>error</code> event. This lesson shows how, and why the rule is
+			worth the ceremony.
+		</p>
+
+		<h2>The contract, stated in the types</h2>
+		<figure class="code">
+			<figcaption><span>packages/ai/src/types.ts</span><span class="lines">the StreamFunction contract</span></figcaption>
+			<pre><code class="language-typescript">// Contract:
+// - Must return an AssistantMessageEventStream.
+// - Once invoked, request/model/runtime failures should be encoded in the
+//   returned stream, not thrown.
+// - Error termination must produce an AssistantMessage with stopReason
+//   "error" or "aborted" and errorMessage, emitted via the stream protocol.
+export type StreamFunction&lt;...&gt; = (model, context, options?) =&gt; AssistantMessageEventStream;</code></pre>
+		</figure>
+		<p>
+			Why insist? Think about the consumer. The agent loop handles a model
+			response with <em>one</em> code path: iterate events, check
+			<code>stopReason</code>. If setup failures threw exceptions instead,
+			every caller would need <code>try/catch</code> <em>around</em> the loop
+			<em>plus</em> the event handling <em>inside</em> it — two error channels,
+			forever, in every consumer, in every UI, in every extension. Funneling
+			all failure through the event grammar means one channel. You've already
+			reaped the benefit twice without noticing: the loop's simple
+			<code>stopReason === "error"</code> check in lesson 2.3 handles network
+			catastrophes and polite refusals identically.
+		</p>
+
+		<h2>The problem: failure before the stream exists</h2>
+		<p>
+			There's a wrinkle. A stream function must return a stream
+			<em>synchronously</em>, but its setup work — resolving OAuth tokens,
+			dynamically importing the adapter module — is async and can fail
+			<em>before any stream exists to emit an error on</em>. The fix is
+			delightfully simple: return an empty stream immediately, do setup behind
+			it, and pipe either the real events or a synthesized error into it.
+		</p>
+
+		<div class="walkthrough">
+			<figure class="code">
+				<figcaption><span>packages/ai/src/api/lazy.ts</span><span class="lines">lazyStream, verbatim</span></figcaption>
+				<pre><code class="language-typescript">export function lazyStream(
+	model: Model&lt;Api&gt;,
+	setup: () =&gt; Promise&lt;AsyncIterable&lt;AssistantMessageEvent&gt;&gt;,
+): AssistantMessageEventStream {
+	const outer = new AssistantMessageEventStream();
+
+	setup()
+		.then((inner) =&gt; {
+			forwardStream(outer, inner);
+		})
+		.catch((error) =&gt; {
+			const message = createSetupErrorMessage(model, error);
+			outer.push({ type: "error", reason: "error", error: message });
+			outer.end(message);
+		});
+
+	return outer;
+}</code></pre>
+			</figure>
+			<p class="anno">
+				Last lesson's <code>EventStream</code>, earning its keep: because a
+				push-queue can exist <em>before its producer does</em>, the caller gets
+				a real, iterable stream on the very same tick, while <code>setup()</code>
+				races ahead in the background. Success → forward the inner stream's
+				events into the outer one. Failure → <code>.catch</code> converts the
+				exception into a synthetic <code>AssistantMessage</code> (empty
+				content, <code>stopReason: "error"</code>, zeroed usage — a perfectly
+				ordinary message that happens to describe a disaster) and pushes it as
+				the terminal event. The exception dies here; data crosses the boundary.
+			</p>
+			<figure class="code">
+				<figcaption><span class="lines">lazyApi, verbatim</span></figcaption>
+				<pre><code class="language-typescript">export function lazyApi(load: () =&gt; Promise&lt;ProviderStreams&gt;): ProviderStreams {
+	return {
+		stream: (model, context, options) =&gt;
+			lazyStream(model, async () =&gt; (await load()).stream(model, context, options)),
+		streamSimple: (model, context, options) =&gt;
+			lazyStream(model, async () =&gt; (await load()).streamSimple(model, context, options)),
+	};
+}</code></pre>
+			</figure>
+			<p class="anno">
+				The second export wraps a whole adapter module. That
+				<code>load</code> argument is a dynamic <code>import()</code> — the
+				Anthropic provider you read in lesson 3.3 doesn't actually pull in the
+				1,200-line adapter until the first request needs it. Fast startup,
+				and a failed module load becomes… you guessed it, an error event.
+			</p>
+		</div>
+
+		<aside class="concept" data-kind="eng">
+			<p class="concept-label">Engineering · Errors as values at API boundaries</p>
+			<p>
+				Exceptions are goto with better manners: they teleport control to
+				wherever the nearest catch happens to be, invisibly to type
+				signatures. <em>Within</em> a small scope that's fine. But across an
+				API boundary — where the caller might be a loop, a UI, a queue
+				consumer — exceptions force every caller to know the throw behavior
+				of everything beneath them, and async makes it worse (a rejection
+				escaping a background task can kill the process).
+			</p>
+			<p>
+				The alternative: make failure part of the return type. Rust's
+				<code>Result</code>, Go's <code>err</code>, and pi's
+				<code>stopReason: "error"</code> messages are one family. The cost is
+				honesty-by-boilerplate — you must check. The payoff is that the type
+				system won't let you forget failure exists, and callers get
+				<em>one</em> channel to handle. Rule of thumb worth stealing: throw
+				inside, return at the edges.
+			</p>
+		</aside>
+
+		<h2>Watch the layers compose</h2>
+		<p>Errors get this treatment at every altitude, in the same costume:</p>
+		<ul>
+			<li><strong>Setup fails</strong> → <code>lazyStream</code> emits an error event (this lesson).</li>
+			<li><strong>Provider fails mid-stream</strong> → the adapter catches it and emits an error event (next module).</li>
+			<li><strong>The loop sees</strong> <code>stopReason: "error"</code> → ends the run gracefully, message preserved (lesson 2.3).</li>
+			<li><strong>A tool fails</strong> → a <code>ToolResultMessage</code> with <code>isError: true</code>, and the <em>model</em> reads the failure (lesson 2.5).</li>
+			<li><strong>The session file</strong> records the error message like any other — crashes are data, auditable next morning (lesson 2.7).</li>
+		</ul>
+		<p>
+			One philosophy, five layers, zero <code>try/catch</code> in any consumer.
+			When an architecture repeats a choice this consistently, that choice is
+			doing structural work.
+		</p>
+
+		<h2>What you now know — and where you stand</h2>
+		<p>
+			Module 3 gave you <code>pi-ai</code>'s entire public face: the message
+			vocabulary, tools and schemas, the model catalog, the event grammar, the
+			stream plumbing, and the no-throw rule. What's left is the part that
+			touches the real world — HTTP requests, SSE bytes, vendor quirks,
+			retries. That's Module 4: the adapters.
+		</p>
+	</article>
+	<script src="../manifest.js"></script>
+	<script src="../assets/vendor/highlight.min.js"></script>
+	<script src="../assets/js/app.js" defer></script>
+</body>
+</html>

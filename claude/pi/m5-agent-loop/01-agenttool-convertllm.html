@@ -1,0 +1,180 @@
+<!doctype html>
+<html lang="en">
+<head>
+	<meta charset="utf-8">
+	<meta name="viewport" content="width=device-width, initial-scale=1">
+	<title>AgentTool and the LLM boundary · pi · Codebase Academy</title>
+	<link rel="stylesheet" href="../assets/css/site.css">
+</head>
+<body>
+	<article class="lesson">
+		<h1>AgentTool and the LLM boundary</h1>
+		<p class="lede">
+			Welcome to <code>pi-agent-core</code> — 8,000 lines that turn "an API for
+			models" into "a thing with agency." Before reading the loop itself, meet
+			the two ideas the whole package is built on: tools that <em>execute</em>,
+			and a message universe slightly bigger than what models are allowed to
+			see.
+		</p>
+
+		<h2>Tool, meet execute()</h2>
+		<p>
+			In Module 3, a <code>Tool</code> was a name, description, and schema —
+			pure description. The agent layer extends it into something that can act:
+		</p>
+		<figure class="code">
+			<figcaption><span>packages/agent/src/types.ts</span><span class="lines">AgentTool, comments trimmed</span></figcaption>
+			<pre><code class="language-typescript">export interface AgentTool&lt;TParameters extends TSchema = TSchema, TDetails = any&gt; extends Tool&lt;TParameters&gt; {
+	/** Human-readable label for UI display. */
+	label: string;
+	/** Optional compatibility shim for raw tool-call arguments before schema validation. */
+	prepareArguments?: (args: unknown) =&gt; Static&lt;TParameters&gt;;
+	/** Execute the tool call. Throw on failure instead of encoding errors in `content`. */
+	execute: (
+		toolCallId: string,
+		params: Static&lt;TParameters&gt;,
+		signal?: AbortSignal,
+		onUpdate?: AgentToolUpdateCallback&lt;TDetails&gt;,
+	) =&gt; Promise&lt;AgentToolResult&lt;TDetails&gt;&gt;;
+	/** Per-tool execution mode override: "sequential" | "parallel". */
+	executionMode?: ToolExecutionMode;
+}
+
+export interface AgentToolResult&lt;T&gt; {
+	/** Text or image content returned to the model. */
+	content: (TextContent | ImageContent)[];
+	/** Arbitrary structured details for logs or UI rendering. */
+	details: T;
+	/** Hint that the agent should stop after the current tool batch. */
+	terminate?: boolean;
+}</code></pre>
+		</figure>
+		<p>Every field is a decision worth reading:</p>
+		<ul>
+			<li>
+				<strong><code>extends Tool</code></strong> — an AgentTool <em>is</em> a
+				Tool (structurally, lesson 3.1), so it can be passed straight into a
+				<code>Context</code>; the model sees only the description half.
+			</li>
+			<li>
+				<strong><code>execute</code> is typed by the schema.</strong>
+				<code>Static&lt;TParameters&gt;</code> — the TypeBox trick from lesson
+				3.2, now completing its third job: the implementation receives exactly
+				what the schema promises, or the code doesn't compile.
+			</li>
+			<li>
+				<strong><code>signal</code></strong> — cancellation reaches into tool
+				execution (a long bash command dies when you hit Esc; lesson 5.3).
+			</li>
+			<li>
+				<strong><code>onUpdate</code></strong> — long-running tools stream
+				partial results (bash output scrolling live in the UI comes from
+				exactly this callback).
+			</li>
+			<li>
+				<strong>Two audiences in the result.</strong> <code>content</code> goes
+				to the model (text/images only — the LLM vocabulary);
+				<code>details</code> goes to humans and UIs (a structured diff, an
+				exit code) without burning context tokens. This one split shows up in
+				every good tool design.
+			</li>
+			<li>
+				<strong>"Throw on failure."</strong> Inside the boundary, exceptions
+				are fine — the loop catches them and converts to
+				<code>isError: true</code> results (you'll see the catch next
+				lessons). Throw inside, return at the edges, exactly as lesson 3.6
+				preached.
+			</li>
+		</ul>
+
+		<h2>A bigger message universe</h2>
+		<p>
+			Real applications need messages that models should never see. The coding
+			agent records shell commands <em>you</em> ran, extension chatter,
+			compaction summaries. The agent layer makes room with a one-line type
+			and a clever hook:
+		</p>
+		<figure class="code">
+			<figcaption><span>packages/agent/src/types.ts</span><span class="lines">the extensible message union</span></figcaption>
+			<pre><code class="language-typescript">/**
+ * Extensible interface for custom app messages.
+ * Apps can extend via declaration merging:
+ *
+ *   declare module "@earendil-works/pi-agent-core" {
+ *     interface CustomAgentMessages {
+ *       artifact: ArtifactMessage;
+ *     }
+ *   }
+ */
+export interface CustomAgentMessages {
+	// Empty by default - apps extend via declaration merging
+}
+
+export type AgentMessage = Message | CustomAgentMessages[keyof CustomAgentMessages];</code></pre>
+		</figure>
+
+		<aside class="concept" data-kind="ts">
+			<p class="concept-label">TypeScript · Declaration merging</p>
+			<p>
+				TypeScript allows an interface to be declared <em>twice</em> — and
+				merges the declarations. <code>declare module "..."</code> lets a
+				<em>downstream package</em> reopen an upstream interface and add
+				members, at compile time only. Here the library ships
+				<code>CustomAgentMessages</code> empty; the coding agent reopens it
+				to register <code>BashExecutionMessage</code>,
+				<code>CustomMessage</code>, and friends (the very types you saw in
+				the session-format doc, lesson 2.7); and suddenly
+				<code>AgentMessage</code> — via the indexed lookup
+				<code>CustomAgentMessages[keyof CustomAgentMessages]</code>, "the
+				union of all registered value types" — includes them everywhere,
+				fully type-checked.
+			</p>
+			<p>
+				Python has no real equivalent — monkey-patching changes runtime
+				objects, while this changes only the <em>type-level</em> world. It's
+				the library-extensibility idiom: the framework defines an empty
+				registry interface, applications populate it. You'll meet it again
+				in the TUI's keybindings and the extension events.
+			</p>
+		</aside>
+
+		<h2>The boundary: convertToLlm</h2>
+		<p>
+			A bigger universe needs a customs checkpoint. The loop works in
+			<code>AgentMessage[]</code> throughout — the file's opening comment says
+			exactly that — and converts down to LLM <code>Message[]</code> in
+			precisely one place: <code>config.convertToLlm</code>, called inside
+			<code>streamAssistantResponse</code> (lesson 2.4).
+		</p>
+		<figure class="diagram">
+			<div class="drow">
+				<div class="dbox"><span class="dbox-title">AgentMessage[]</span><span class="dbox-sub">user, assistant, toolResult,<br>bashExecution, custom, …</span></div>
+				<span class="darrow">→ <span class="dlabel">convertToLlm (one place!)</span></span>
+				<div class="dbox accent"><span class="dbox-title">Message[]</span><span class="dbox-sub">only user / assistant / toolResult</span></div>
+				<span class="darrow">→</span>
+				<div class="dbox"><span class="dbox-title">pi-ai</span><span class="dbox-sub">the wire</span></div>
+			</div>
+			<figcaption class="dcaption">Custom messages are converted (a bash execution becomes a user-role transcript snippet) or dropped — the app decides, in one function.</figcaption>
+		</figure>
+		<p>
+			The default implementation passes standard messages through and filters
+			custom ones out. The coding agent supplies its own, which also serves as
+			a defense layer — it strips images when the model can't see them, for
+			instance. One function, swappable, at the narrowest point: this is how
+			you keep an extensible system honest.
+		</p>
+
+		<h2>What you now know</h2>
+		<p>
+			The agent layer adds exactly two things to the pi-ai vocabulary: tools
+			that execute (with cancellation, streaming updates, and a
+			model/human split in their results) and an app-extensible message union
+			with a single conversion point down to LLM reality. Now — finally — the
+			loop, line by line.
+		</p>
+	</article>
+	<script src="../manifest.js"></script>
+	<script src="../assets/vendor/highlight.min.js"></script>
+	<script src="../assets/js/app.js" defer></script>
+</body>
+</html>

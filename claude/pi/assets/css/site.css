@@ -1,0 +1,1129 @@
+/* ============================================================
+   Codebase Academy — design system
+   Zero-build static site. One stylesheet: tokens, layout,
+   prose, and every component. Light + dark via
+   prefers-color-scheme.
+   ============================================================ */
+
+/* ---------- Tokens ---------- */
+
+:root {
+	color-scheme: light dark;
+
+	/* Surfaces & text */
+	--bg: #faf9f7;
+	--surface: #ffffff;
+	--surface-2: #f3f1ec;
+	--text: #23272e;
+	--text-muted: #6b7079;
+	--text-faint: #9aa0a8;
+	--border: #e5e1d8;
+	--border-strong: #d4cfc4;
+
+	/* Accent (calm indigo) */
+	--accent: #4a55c4;
+	--accent-strong: #3a44a8;
+	--accent-soft: #eceefb;
+	--accent-border: #c9cdf0;
+
+	/* Concept-box kinds */
+	--kind-ts: #2469b3;
+	--kind-ts-bg: #edf4fb;
+	--kind-node: #2c7a4b;
+	--kind-node-bg: #ecf6f0;
+	--kind-llm: #7c3aad;
+	--kind-llm-bg: #f5eefb;
+	--kind-eng: #9a6700;
+	--kind-eng-bg: #fbf4e4;
+
+	/* Callouts */
+	--note: #2469b3;
+	--note-bg: #edf4fb;
+	--warn: #b3512a;
+	--warn-bg: #fbefe9;
+	--deeper: #6b7079;
+	--deeper-bg: #f3f1ec;
+
+	/* Code */
+	--code-bg: #f6f4ef;
+	--code-block-bg: #f8f7f3;
+	--code-border: #e5e1d8;
+	--code-fg: #24292f;
+	--code-keyword: #cf222e;
+	--code-string: #0a3069;
+	--code-comment: #6e7781;
+	--code-title: #8250df;
+	--code-number: #0550ae;
+	--code-type: #953800;
+	--code-attr: #116329;
+	--code-meta: #82071e;
+
+	/* Diagram */
+	--dbox-bg: #ffffff;
+	--dbox-border: #d4cfc4;
+
+	--radius: 8px;
+	--radius-lg: 12px;
+	--sidebar-w: 292px;
+	--measure: 68ch;
+	--measure-wide: 88ch;
+
+	--font-sans: -apple-system, BlinkMacSystemFont, "Segoe UI", system-ui, sans-serif;
+	--font-mono: ui-monospace, "SF Mono", "Cascadia Code", Menlo, Consolas, monospace;
+
+	--shadow-card: 0 1px 2px rgba(35, 39, 46, 0.05), 0 4px 14px rgba(35, 39, 46, 0.05);
+}
+
+@media (prefers-color-scheme: dark) {
+	:root {
+		--bg: #15171c;
+		--surface: #1c1f26;
+		--surface-2: #22262e;
+		--text: #dfe2e7;
+		--text-muted: #9aa1ab;
+		--text-faint: #6d7480;
+		--border: #2b303a;
+		--border-strong: #3a4150;
+
+		--accent: #8d96f2;
+		--accent-strong: #a7aef5;
+		--accent-soft: #23263c;
+		--accent-border: #3d4470;
+
+		--kind-ts: #6cb0f0;
+		--kind-ts-bg: #1b2531;
+		--kind-node: #6fce96;
+		--kind-node-bg: #1a2a21;
+		--kind-llm: #c78ef0;
+		--kind-llm-bg: #271e31;
+		--kind-eng: #ddb057;
+		--kind-eng-bg: #2b2416;
+
+		--note: #6cb0f0;
+		--note-bg: #1b2531;
+		--warn: #e08a63;
+		--warn-bg: #2e2019;
+		--deeper: #9aa1ab;
+		--deeper-bg: #22262e;
+
+		--code-bg: #242832;
+		--code-block-bg: #1a1d24;
+		--code-border: #2b303a;
+		--code-fg: #d6dae0;
+		--code-keyword: #ff7b72;
+		--code-string: #a5d6ff;
+		--code-comment: #8b949e;
+		--code-title: #d2a8ff;
+		--code-number: #79c0ff;
+		--code-type: #ffa657;
+		--code-attr: #7ee787;
+		--code-meta: #ffa198;
+
+		--dbox-bg: #22262e;
+		--dbox-border: #3a4150;
+
+		--shadow-card: 0 1px 2px rgba(0, 0, 0, 0.4), 0 4px 14px rgba(0, 0, 0, 0.3);
+	}
+}
+
+/* ---------- Reset-ish ---------- */
+
+*,
+*::before,
+*::after {
+	box-sizing: border-box;
+}
+
+html {
+	-webkit-text-size-adjust: 100%;
+}
+
+body {
+	margin: 0;
+	background: var(--bg);
+	color: var(--text);
+	font-family: var(--font-sans);
+	font-size: 17px;
+	line-height: 1.65;
+	text-rendering: optimizeLegibility;
+	-webkit-font-smoothing: antialiased;
+}
+
+img,
+svg {
+	max-width: 100%;
+	height: auto;
+}
+
+/* ---------- Page layout ---------- */
+
+.layout {
+	display: grid;
+	grid-template-columns: var(--sidebar-w) minmax(0, 1fr);
+	/* dvh, not vh: iOS Safari collapses its URL bar while scrolling and vh
+	   measures against the taller pre-collapse viewport. */
+	min-height: 100dvh;
+}
+
+.layout > main {
+	padding: 2.5rem clamp(1.25rem, 5vw, 4.5rem) 5rem;
+	min-width: 0;
+}
+
+/* Pages without a sidebar (home, course landing) */
+.layout.no-sidebar {
+	grid-template-columns: minmax(0, 1fr);
+}
+
+@media (max-width: 900px) {
+	.layout {
+		grid-template-columns: minmax(0, 1fr);
+	}
+}
+
+/* ---------- Sidebar ---------- */
+
+.sidebar {
+	border-right: 1px solid var(--border);
+	background: color-mix(in srgb, var(--surface) 55%, var(--bg));
+	padding: 1.5rem 1rem 2rem;
+	position: sticky;
+	top: 0;
+	height: 100dvh;
+	overflow-y: auto;
+	scrollbar-width: thin;
+	font-size: 0.88rem;
+}
+
+.sidebar .brand {
+	display: block;
+	font-weight: 700;
+	font-size: 0.95rem;
+	color: var(--text);
+	text-decoration: none;
+	margin: 0 0.5rem 0.25rem;
+	letter-spacing: -0.01em;
+}
+
+.sidebar .course-title {
+	display: block;
+	color: var(--text-muted);
+	text-decoration: none;
+	margin: 0 0.5rem 1.25rem;
+	font-size: 0.85rem;
+}
+
+.sidebar .course-title:hover {
+	color: var(--accent);
+}
+
+.sidebar details {
+	margin-bottom: 0.3rem;
+}
+
+.sidebar summary {
+	cursor: pointer;
+	list-style: none;
+	padding: 0.4rem 0.5rem;
+	border-radius: var(--radius);
+	font-weight: 600;
+	font-size: 0.82rem;
+	color: var(--text-muted);
+	user-select: none;
+	display: flex;
+	align-items: baseline;
+	gap: 0.45rem;
+}
+
+.sidebar summary::-webkit-details-marker {
+	display: none;
+}
+
+.sidebar summary::before {
+	content: "▸";
+	font-size: 0.7em;
+	color: var(--text-faint);
+	transition: transform 0.15s ease;
+	flex: none;
+}
+
+.sidebar details[open] > summary::before {
+	transform: rotate(90deg);
+}
+
+.sidebar summary:hover {
+	background: var(--surface-2);
+	color: var(--text);
+}
+
+.sidebar .module-num {
+	color: var(--text-faint);
+	font-weight: 600;
+	font-variant-numeric: tabular-nums;
+	flex: none;
+}
+
+.sidebar ol {
+	list-style: none;
+	margin: 0.1rem 0 0.5rem;
+	padding: 0 0 0 1.15rem;
+}
+
+.sidebar ol a {
+	display: block;
+	padding: 0.28rem 0.55rem;
+	border-radius: 6px;
+	color: var(--text-muted);
+	text-decoration: none;
+	line-height: 1.4;
+}
+
+.sidebar ol a:hover {
+	background: var(--surface-2);
+	color: var(--text);
+}
+
+.sidebar ol a.active {
+	background: var(--accent-soft);
+	color: var(--accent);
+	font-weight: 600;
+}
+
+.sidebar .soon {
+	display: block;
+	padding: 0.28rem 0.55rem;
+	color: var(--text-faint);
+	font-style: italic;
+	line-height: 1.4;
+}
+
+.sidebar-toggle {
+	display: none;
+	width: 100%;
+	margin: 0 0 0.8rem;
+	padding: 0.5rem 0.75rem;
+	font: inherit;
+	font-weight: 600;
+	color: var(--text-muted);
+	background: var(--surface);
+	border: 1px solid var(--border-strong);
+	border-radius: var(--radius);
+	cursor: pointer;
+}
+
+@media (max-width: 900px) {
+	.sidebar {
+		position: static;
+		height: auto;
+		border-right: none;
+		border-bottom: 1px solid var(--border);
+	}
+	.sidebar:not([data-mobile-open]) > details {
+		display: none;
+	}
+	.sidebar-toggle {
+		display: block;
+	}
+}
+
+/* ---------- Lesson article ---------- */
+
+.lesson {
+	max-width: var(--measure);
+	margin: 0 auto;
+}
+
+.crumbs {
+	max-width: var(--measure);
+	margin: 0 auto 0.4rem;
+	font-size: 0.82rem;
+	color: var(--text-faint);
+}
+
+.crumbs a {
+	color: var(--text-muted);
+	text-decoration: none;
+}
+
+.crumbs a:hover {
+	color: var(--accent);
+}
+
+.crumbs .sep {
+	margin: 0 0.4rem;
+	color: var(--text-faint);
+}
+
+.lesson-meta {
+	max-width: var(--measure);
+	margin: 0 auto 2.2rem;
+	font-size: 0.82rem;
+	color: var(--text-faint);
+	letter-spacing: 0.01em;
+}
+
+/* ---------- Prose ---------- */
+
+.lesson h1 {
+	font-size: 2.05rem;
+	line-height: 1.2;
+	letter-spacing: -0.02em;
+	margin: 0.2rem 0 1rem;
+}
+
+.lesson .lede {
+	font-size: 1.14rem;
+	color: var(--text-muted);
+	line-height: 1.6;
+	margin: 0 0 2rem;
+}
+
+.lesson h2 {
+	font-size: 1.42rem;
+	line-height: 1.3;
+	letter-spacing: -0.015em;
+	margin: 3rem 0 0.9rem;
+}
+
+.lesson h3 {
+	font-size: 1.12rem;
+	margin: 2.2rem 0 0.7rem;
+}
+
+.lesson p,
+.lesson ul,
+.lesson ol {
+	margin: 0 0 1.15rem;
+}
+
+.lesson li {
+	margin-bottom: 0.35rem;
+}
+
+.lesson a {
+	color: var(--accent);
+	text-decoration: underline;
+	text-decoration-color: color-mix(in srgb, var(--accent) 35%, transparent);
+	text-underline-offset: 2px;
+}
+
+.lesson a:hover {
+	text-decoration-color: var(--accent);
+}
+
+.lesson strong {
+	font-weight: 650;
+}
+
+.lesson hr {
+	border: none;
+	border-top: 1px solid var(--border);
+	margin: 2.5rem 0;
+}
+
+.lesson blockquote {
+	margin: 0 0 1.15rem;
+	padding: 0.1rem 0 0.1rem 1.1rem;
+	border-left: 3px solid var(--border-strong);
+	color: var(--text-muted);
+}
+
+.lesson table {
+	border-collapse: collapse;
+	width: 100%;
+	margin: 0 0 1.3rem;
+	font-size: 0.92rem;
+}
+
+.lesson th,
+.lesson td {
+	text-align: left;
+	padding: 0.5rem 0.75rem;
+	border-bottom: 1px solid var(--border);
+	vertical-align: top;
+}
+
+.lesson th {
+	font-size: 0.8rem;
+	text-transform: uppercase;
+	letter-spacing: 0.04em;
+	color: var(--text-muted);
+	border-bottom: 2px solid var(--border-strong);
+}
+
+/* Inline code */
+.lesson code {
+	font-family: var(--font-mono);
+	font-size: 0.855em;
+	background: var(--code-bg);
+	border: 1px solid var(--code-border);
+	border-radius: 5px;
+	padding: 0.1em 0.35em;
+}
+
+.lesson pre code {
+	background: none;
+	border: none;
+	padding: 0;
+	font-size: inherit;
+}
+
+/* File-path chip */
+code.path {
+	background: var(--surface);
+	border: 1px solid var(--border-strong);
+	border-radius: 999px;
+	padding: 0.12em 0.6em;
+	font-size: 0.8em;
+	color: var(--text-muted);
+	white-space: nowrap;
+}
+
+/* Keyboard key */
+kbd {
+	font-family: var(--font-mono);
+	font-size: 0.8em;
+	background: var(--surface);
+	border: 1px solid var(--border-strong);
+	border-bottom-width: 2px;
+	border-radius: 5px;
+	padding: 0.08em 0.45em;
+}
+
+/* ---------- Code figures ---------- */
+
+figure.code {
+	margin: 1.6rem 0;
+	border: 1px solid var(--code-border);
+	border-radius: var(--radius-lg);
+	overflow: hidden;
+	background: var(--code-block-bg);
+}
+
+figure.code > figcaption {
+	font-family: var(--font-mono);
+	font-size: 0.74rem;
+	color: var(--text-muted);
+	background: var(--surface-2);
+	border-bottom: 1px solid var(--code-border);
+	padding: 0.45rem 1rem;
+	display: flex;
+	justify-content: space-between;
+	gap: 1rem;
+}
+
+figure.code > figcaption .lines {
+	color: var(--text-faint);
+	flex: none;
+}
+
+figure.code pre {
+	margin: 0;
+	padding: 0.9rem 1rem;
+	overflow-x: auto;
+	line-height: 1.55;
+	font-size: 0.8rem;
+}
+
+figure.code pre code {
+	font-family: var(--font-mono);
+	color: var(--code-fg);
+	display: block;
+}
+
+/* Wide breakout for code + diagrams */
+.wide {
+	width: min(var(--measure-wide), 100%);
+	margin-left: 50%;
+	transform: translateX(-50%);
+}
+
+@media (max-width: 1100px) {
+	.wide {
+		width: 100%;
+		margin-left: 0;
+		transform: none;
+	}
+}
+
+/* highlight.js token mapping (theme via variables) */
+.hljs {
+	color: var(--code-fg);
+	background: transparent;
+}
+.hljs-keyword,
+.hljs-selector-tag,
+.hljs-deletion {
+	color: var(--code-keyword);
+}
+.hljs-string,
+.hljs-regexp,
+.hljs-addition {
+	color: var(--code-string);
+}
+.hljs-comment,
+.hljs-quote {
+	color: var(--code-comment);
+	font-style: italic;
+}
+.hljs-title,
+.hljs-title.function_,
+.hljs-section {
+	color: var(--code-title);
+}
+.hljs-number,
+.hljs-literal,
+.hljs-symbol,
+.hljs-bullet,
+.hljs-link,
+.hljs-variable.constant_ {
+	color: var(--code-number);
+}
+.hljs-title.class_,
+.hljs-type,
+.hljs-built_in,
+.hljs-template-variable {
+	color: var(--code-type);
+}
+.hljs-attr,
+.hljs-attribute,
+.hljs-property,
+.hljs-selector-attr,
+.hljs-selector-class,
+.hljs-selector-id,
+.hljs-variable {
+	color: var(--code-attr);
+}
+.hljs-meta,
+.hljs-doctag,
+.hljs-name,
+.hljs-strong {
+	color: var(--code-meta);
+}
+.hljs-emphasis {
+	font-style: italic;
+}
+.hljs-strong {
+	font-weight: 600;
+}
+
+/* ---------- Walkthrough (code + interleaved annotations) ---------- */
+
+.walkthrough {
+	margin: 1.8rem 0;
+	padding-left: 1.1rem;
+	border-left: 3px solid var(--accent-border);
+}
+
+.walkthrough figure.code {
+	margin: 0.9rem 0;
+}
+
+.walkthrough p.anno {
+	margin: 0.9rem 0;
+	color: var(--text);
+}
+
+.walkthrough p.anno::before {
+	content: "▸ ";
+	color: var(--accent);
+	font-size: 0.85em;
+}
+
+/* ---------- Concept boxes ---------- */
+
+aside.concept {
+	margin: 1.8rem 0;
+	padding: 1rem 1.25rem 0.4rem;
+	border-radius: var(--radius-lg);
+	border: 1px solid var(--border);
+	border-left-width: 4px;
+	background: var(--surface-2);
+	font-size: 0.94rem;
+}
+
+aside.concept .concept-label {
+	font-size: 0.72rem;
+	font-weight: 700;
+	text-transform: uppercase;
+	letter-spacing: 0.07em;
+	margin: 0 0 0.6rem;
+}
+
+aside.concept[data-kind="ts"] {
+	border-left-color: var(--kind-ts);
+	background: var(--kind-ts-bg);
+}
+aside.concept[data-kind="ts"] .concept-label {
+	color: var(--kind-ts);
+}
+aside.concept[data-kind="node"] {
+	border-left-color: var(--kind-node);
+	background: var(--kind-node-bg);
+}
+aside.concept[data-kind="node"] .concept-label {
+	color: var(--kind-node);
+}
+aside.concept[data-kind="llm"] {
+	border-left-color: var(--kind-llm);
+	background: var(--kind-llm-bg);
+}
+aside.concept[data-kind="llm"] .concept-label {
+	color: var(--kind-llm);
+}
+aside.concept[data-kind="eng"] {
+	border-left-color: var(--kind-eng);
+	background: var(--kind-eng-bg);
+}
+aside.concept[data-kind="eng"] .concept-label {
+	color: var(--kind-eng);
+}
+
+aside.concept figure.code {
+	background: color-mix(in srgb, var(--code-block-bg) 70%, transparent);
+}
+
+/* ---------- Callouts ---------- */
+
+.callout {
+	margin: 1.8rem 0;
+	padding: 0.85rem 1.15rem;
+	border-radius: var(--radius-lg);
+	border: 1px solid var(--border);
+	border-left-width: 4px;
+	font-size: 0.94rem;
+}
+
+.callout > p {
+	margin: 0 0 0.6rem;
+}
+
+.callout > p:last-child {
+	margin-bottom: 0;
+}
+
+.callout.note {
+	border-left-color: var(--note);
+	background: var(--note-bg);
+}
+.callout.warn {
+	border-left-color: var(--warn);
+	background: var(--warn-bg);
+}
+.callout.deeper {
+	border-left-color: var(--deeper);
+	background: var(--deeper-bg);
+	color: var(--text-muted);
+}
+
+.callout .callout-label {
+	display: block;
+	font-size: 0.72rem;
+	font-weight: 700;
+	text-transform: uppercase;
+	letter-spacing: 0.07em;
+	margin-bottom: 0.35rem;
+}
+.callout.note .callout-label {
+	color: var(--note);
+}
+.callout.warn .callout-label {
+	color: var(--warn);
+}
+.callout.deeper .callout-label {
+	color: var(--deeper);
+}
+
+/* ---------- Digression (optional depth) ---------- */
+
+details.digression {
+	margin: 1.8rem 0;
+	border: 1px dashed var(--border-strong);
+	border-radius: var(--radius-lg);
+	padding: 0;
+	font-size: 0.94rem;
+}
+
+details.digression > summary {
+	cursor: pointer;
+	padding: 0.75rem 1.15rem;
+	font-weight: 600;
+	color: var(--text-muted);
+	user-select: none;
+	list-style: none;
+}
+
+details.digression > summary::-webkit-details-marker {
+	display: none;
+}
+
+details.digression > summary::before {
+	content: "＋ ";
+	color: var(--text-faint);
+}
+
+details.digression[open] > summary::before {
+	content: "－ ";
+}
+
+details.digression > summary:hover {
+	color: var(--text);
+}
+
+details.digression > .digression-body {
+	padding: 0 1.15rem 0.5rem;
+	border-top: 1px dashed var(--border);
+}
+
+/* ---------- Diagrams (HTML/CSS boxes) ---------- */
+
+.diagram {
+	margin: 1.8rem 0;
+	padding: 1.4rem 1.2rem;
+	border: 1px solid var(--border);
+	border-radius: var(--radius-lg);
+	background: var(--surface);
+	display: flex;
+	flex-direction: column;
+	align-items: center;
+	gap: 0.35rem;
+	font-size: 0.85rem;
+}
+
+.diagram .drow {
+	display: flex;
+	align-items: center;
+	justify-content: center;
+	gap: 0.35rem;
+	flex-wrap: wrap;
+}
+
+.dbox {
+	background: var(--dbox-bg);
+	border: 1.5px solid var(--dbox-border);
+	border-radius: var(--radius);
+	padding: 0.45rem 0.9rem;
+	text-align: center;
+	line-height: 1.35;
+}
+
+.dbox .dbox-title {
+	font-weight: 650;
+	font-family: var(--font-mono);
+	font-size: 0.82rem;
+}
+
+.dbox .dbox-sub {
+	color: var(--text-muted);
+	font-size: 0.76rem;
+}
+
+.dbox.accent {
+	border-color: var(--accent);
+	background: var(--accent-soft);
+}
+
+.dbox.faded {
+	opacity: 0.62;
+}
+
+.darrow {
+	color: var(--text-faint);
+	font-size: 1rem;
+	line-height: 1;
+	padding: 0.1rem 0.3rem;
+	user-select: none;
+}
+
+.darrow .dlabel,
+.dlabel {
+	font-size: 0.72rem;
+	color: var(--text-muted);
+	font-family: var(--font-mono);
+}
+
+.diagram figcaption,
+.diagram .dcaption {
+	margin-top: 0.8rem;
+	font-size: 0.8rem;
+	color: var(--text-muted);
+	text-align: center;
+	max-width: 48ch;
+}
+
+/* Inline SVG diagrams */
+figure.svg-diagram {
+	margin: 1.8rem 0;
+	padding: 1.2rem 1rem;
+	border: 1px solid var(--border);
+	border-radius: var(--radius-lg);
+	background: var(--surface);
+	text-align: center;
+}
+
+figure.svg-diagram svg {
+	max-width: 100%;
+	height: auto;
+}
+
+figure.svg-diagram figcaption {
+	margin-top: 0.7rem;
+	font-size: 0.8rem;
+	color: var(--text-muted);
+}
+
+figure.svg-diagram text {
+	font-family: var(--font-sans);
+}
+
+figure.svg-diagram .mono {
+	font-family: var(--font-mono);
+}
+
+/* ---------- Prev / next footer ---------- */
+
+.lesson-nav {
+	max-width: var(--measure);
+	margin: 3.5rem auto 0;
+	display: grid;
+	grid-template-columns: 1fr 1fr;
+	gap: 1rem;
+	border-top: 1px solid var(--border);
+	padding-top: 1.8rem;
+}
+
+.lesson-nav a {
+	display: block;
+	border: 1px solid var(--border);
+	border-radius: var(--radius-lg);
+	padding: 0.85rem 1.1rem;
+	text-decoration: none;
+	color: var(--text);
+	background: var(--surface);
+	transition: border-color 0.12s ease;
+	min-width: 0;
+}
+
+.lesson-nav a:hover {
+	border-color: var(--accent);
+}
+
+.lesson-nav .nav-dir {
+	display: block;
+	font-size: 0.72rem;
+	text-transform: uppercase;
+	letter-spacing: 0.07em;
+	color: var(--text-faint);
+	margin-bottom: 0.25rem;
+}
+
+.lesson-nav .nav-title {
+	font-weight: 600;
+	font-size: 0.95rem;
+	color: var(--accent);
+}
+
+.lesson-nav .next {
+	grid-column: 2;
+	text-align: right;
+}
+
+.lesson-nav .prev {
+	grid-column: 1;
+}
+
+@media (max-width: 640px) {
+	.lesson-nav {
+		grid-template-columns: 1fr;
+	}
+	.lesson-nav .next,
+	.lesson-nav .prev {
+		grid-column: 1;
+		text-align: left;
+	}
+}
+
+/* ---------- Home & course landing ---------- */
+
+.hero {
+	max-width: var(--measure);
+	margin: 2rem auto 3rem;
+}
+
+.hero h1 {
+	font-size: 2.5rem;
+	letter-spacing: -0.025em;
+	line-height: 1.15;
+	margin: 0 0 1rem;
+}
+
+.hero p {
+	font-size: 1.15rem;
+	color: var(--text-muted);
+	max-width: 58ch;
+}
+
+.course-cards {
+	max-width: var(--measure);
+	margin: 0 auto;
+	display: grid;
+	gap: 1.2rem;
+}
+
+.course-card {
+	display: block;
+	text-decoration: none;
+	color: var(--text);
+	background: var(--surface);
+	border: 1px solid var(--border);
+	border-radius: var(--radius-lg);
+	padding: 1.5rem 1.7rem;
+	box-shadow: var(--shadow-card);
+	transition: border-color 0.12s ease, transform 0.12s ease;
+}
+
+.course-card:hover {
+	border-color: var(--accent);
+	transform: translateY(-1px);
+}
+
+.course-card h2 {
+	margin: 0 0 0.4rem;
+	font-size: 1.35rem;
+	letter-spacing: -0.015em;
+	color: var(--accent);
+}
+
+.course-card p {
+	margin: 0 0 0.8rem;
+	color: var(--text-muted);
+	font-size: 0.97rem;
+}
+
+.course-card .card-meta {
+	font-size: 0.8rem;
+	color: var(--text-faint);
+}
+
+.course-card.coming-soon {
+	opacity: 0.65;
+	pointer-events: none;
+}
+
+/* Syllabus on course landing */
+.syllabus {
+	max-width: var(--measure);
+	margin: 0 auto;
+}
+
+.syllabus .module {
+	margin-bottom: 2.2rem;
+}
+
+.syllabus .module > h2 {
+	font-size: 1.15rem;
+	margin: 0 0 0.2rem;
+	display: flex;
+	align-items: baseline;
+	gap: 0.6rem;
+}
+
+.syllabus .module > h2 .module-num {
+	color: var(--text-faint);
+	font-size: 0.85rem;
+	font-weight: 600;
+	font-variant-numeric: tabular-nums;
+	flex: none;
+}
+
+.syllabus .module > p.module-blurb {
+	color: var(--text-muted);
+	font-size: 0.92rem;
+	margin: 0 0 0.7rem;
+}
+
+.syllabus ol.lessons {
+	list-style: none;
+	margin: 0;
+	padding: 0;
+	border: 1px solid var(--border);
+	border-radius: var(--radius-lg);
+	overflow: hidden;
+	background: var(--surface);
+}
+
+.syllabus ol.lessons li {
+	margin: 0;
+	border-bottom: 1px solid var(--border);
+}
+
+.syllabus ol.lessons li:last-child {
+	border-bottom: none;
+}
+
+.syllabus ol.lessons a {
+	display: flex;
+	justify-content: space-between;
+	align-items: baseline;
+	gap: 1rem;
+	padding: 0.65rem 1.1rem;
+	text-decoration: none;
+	color: var(--text);
+	font-size: 0.95rem;
+}
+
+.syllabus ol.lessons a:hover {
+	background: var(--accent-soft);
+	color: var(--accent);
+}
+
+.syllabus ol.lessons .mins {
+	flex: none;
+	font-size: 0.78rem;
+	color: var(--text-faint);
+	font-variant-numeric: tabular-nums;
+}
+
+/* ---------- Footer ---------- */
+
+.site-footer {
+	max-width: var(--measure);
+	margin: 4rem auto 0;
+	padding-top: 1.5rem;
+	border-top: 1px solid var(--border);
+	font-size: 0.8rem;
+	color: var(--text-faint);
+}
+
+.site-footer a {
+	color: var(--text-muted);
+}
+
+/* ---------- Utility ---------- */
+
+.muted {
+	color: var(--text-muted);
+}
+
+.small {
+	font-size: 0.88rem;
+}
+
+/* ---------- Narrow screens: contain sideways overflow ---------- */
+
+@media (max-width: 640px) {
+	/* A wide table would otherwise widen the page itself. display:block makes
+	   the table its own scroll container; overscroll-behavior-x stops a
+	   sideways swipe turning into Safari's back-navigation gesture. */
+	.lesson table {
+		display: block;
+		overflow-x: auto;
+		-webkit-overflow-scrolling: touch;
+		overscroll-behavior-x: contain;
+		white-space: nowrap;
+	}
+	figure.code pre {
+		overscroll-behavior-x: contain;
+		font-size: 0.72rem;
+	}
+}

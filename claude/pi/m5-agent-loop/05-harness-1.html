@@ -1,0 +1,146 @@
+<!doctype html>
+<html lang="en">
+<head>
+	<meta charset="utf-8">
+	<meta name="viewport" content="width=device-width, initial-scale=1">
+	<title>AgentHarness: sessions, trees, compaction · pi · Codebase Academy</title>
+	<link rel="stylesheet" href="../assets/css/site.css">
+</head>
+<body>
+	<article class="lesson">
+		<h1>AgentHarness: sessions, trees, compaction</h1>
+		<p class="lede">
+			Above <code>Agent</code>, the library ships one more layer:
+			<code>AgentHarness</code>, a "batteries included" runtime with
+			persistence, branching, compaction, and skills built in. We tour it at
+			medium altitude — partly for its own ideas, partly to set up next
+			lesson's twist.
+		</p>
+
+		<h2>What the harness adds</h2>
+		<p>
+			An <code>Agent</code> forgets everything when the process exits, and
+			every app needs the same next five features. The harness
+		 (~1,000 lines in <code class="path">packages/agent/src/harness/</code>)
+			packages them:
+		</p>
+		<figure class="diagram">
+			<div class="drow">
+				<div class="dbox"><span class="dbox-title">session tree</span><span class="dbox-sub">persistent, branching transcript</span></div>
+				<div class="dbox"><span class="dbox-title">compaction</span><span class="dbox-sub">summarize when context fills</span></div>
+				<div class="dbox"><span class="dbox-title">hook/event map</span><span class="dbox-sub">~25 typed extension points</span></div>
+			</div>
+			<div class="drow">
+				<div class="dbox"><span class="dbox-title">skills &amp; templates</span><span class="dbox-sub">SKILL.md loading, $ARGUMENTS prompts</span></div>
+				<div class="dbox"><span class="dbox-title">ExecutionEnv</span><span class="dbox-sub">pluggable FileSystem/Shell</span></div>
+			</div>
+			<span class="darrow">↓ wraps</span>
+			<div class="drow">
+				<div class="dbox accent"><span class="dbox-title">Agent + runLoop</span><span class="dbox-sub">Modules you've read</span></div>
+			</div>
+		</figure>
+
+		<h2>The session tree</h2>
+		<p>
+			The harness persists a conversation not as a list but as an
+			<strong>append-only tree of typed entries</strong> — the design you
+			previewed in the session file (lesson 2.7). The entry vocabulary, from
+			the harness types:
+		</p>
+		<figure class="code">
+			<figcaption><span>packages/agent/src/harness/types.ts</span><span class="lines">SessionTreeEntry variants (names only)</span></figcaption>
+			<pre><code class="language-typescript">type: "message"                // one AgentMessage
+type: "thinking_level_change"  // user changed reasoning level here
+type: "model_change"           // switched models mid-conversation
+type: "active_tools_change"    // enabled/disabled tools
+type: "compaction"             // older history summarized; cut point recorded
+type: "branch_summary"         // an abandoned branch, summarized
+type: "custom"                 // extension data
+type: "label"                  // named bookmark
+type: "session_info"           // header: cwd, version
+type: "leaf"                   // pointer: which branch is active</code></pre>
+		</figure>
+		<p>
+			Notice what became <em>entries</em>: changing the model isn't a settings
+			mutation, it's a fact in the log — so replaying the log reproduces not
+			just what was said but <em>under which configuration</em>. Every entry
+			has <code>id</code>/<code>parentId</code>; the <code>leaf</code> pointer
+			names the active branch. Rewind-and-retry appends a new child to an old
+			entry and moves the leaf. Nothing is ever deleted.
+		</p>
+		<p>Rebuilding "the current conversation" is then a pure function — walk root-to-leaf and fold:</p>
+		<figure class="code">
+			<figcaption><span>packages/agent/src/harness/session/session.ts</span><span class="lines">buildSessionContext, abridged</span></figcaption>
+			<pre><code class="language-typescript">export function buildSessionContext(pathEntries: SessionTreeEntry[]): SessionContext {
+	let thinkingLevel = "off";
+	let model: { provider: string; modelId: string } | null = null;
+	let compaction: CompactionEntry | null = null;
+
+	for (const entry of pathEntries) {
+		if (entry.type === "thinking_level_change") thinkingLevel = entry.thinkingLevel;
+		else if (entry.type === "model_change") model = { provider: entry.provider, modelId: entry.modelId };
+		else if (entry.type === "message" &amp;&amp; entry.message.role === "assistant")
+			model = { provider: entry.message.provider, modelId: entry.message.model };
+		else if (entry.type === "compaction") compaction = entry;
+	}
+	// ...then assemble messages, honoring the compaction cut point
+}</code></pre>
+		</figure>
+		<p>
+			State-as-a-fold-over-events — the same reducer idea as
+			<code>processEvents</code> last lesson, applied to disk. If you've heard
+			the term <em>event sourcing</em>, this is it, in fifty readable lines.
+		</p>
+
+		<h2>Compaction, previewed</h2>
+		<p>
+			The harness also owns the answer to "the conversation outgrew the context
+			window": pick a <em>cut point</em> that keeps recent turns intact, ask a
+			model to summarize everything before it, and append a
+			<code>compaction</code> entry holding the summary. Future context =
+			summary + everything after the cut. The tree keeps the full history —
+			compaction changes what the <em>model</em> sees, never what the file
+			remembers. The coding agent's version of this gets a full lesson
+			(7.3), with the actual budgets and cut-point algorithm.
+		</p>
+
+		<h2>ExecutionEnv: the quiet abstraction</h2>
+		<p>
+			Subtlest piece: harness code never touches <code>fs</code> or spawns
+			processes directly. It goes through an <code>ExecutionEnv</code> — an
+			interface bundling a <code>FileSystem</code> and a <code>Shell</code>,
+			with a Node implementation provided. Swap the env and your agent's
+			tools run against SSH, a container, a sandbox — without the agent
+			noticing. Remember the read tool's pluggable <code>ReadOperations</code>
+			(lesson 2.5)? Same move, one level up. Boundary-drawing for
+			testability <em>and</em> deployability: the faux provider faked the
+			model; ExecutionEnv can fake (or relocate) the world.
+		</p>
+
+		<div class="callout note">
+			<span class="callout-label">Note · the hook map</span>
+			<p>
+				The harness also defines a large typed event/hook map —
+				<code>before_agent_start</code>, <code>before_provider_request</code>,
+				<code>tool_call</code>, <code>session_compact</code>, and ~20 more,
+				each with typed results that can mutate behavior. Hold the thought:
+				the coding agent's extension API (Module 8) is this same design,
+				grown independently. Seeing the pattern twice is next lesson's
+				point.
+			</p>
+		</div>
+
+		<h2>What you now know</h2>
+		<p>
+			The harness turns the Agent into an application platform: an
+			event-sourced session tree, compaction, typed hooks, skills, and a
+			pluggable world. A reasonable person would now assume pi's coding agent
+			is built on it. It isn't — and the reasons why are one of the most
+			instructive stories in the repository. Next lesson: the plot twist.
+		</p>
+	</article>
+	<script src="../manifest.js"></script>
+	<script src="../assets/vendor/highlight.min.js"></script>
+	<script src="../assets/js/app.js" defer></script>
+</body>
+</html>

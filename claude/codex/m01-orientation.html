@@ -1,0 +1,705 @@
+<!doctype html>
+<html lang="en">
+<head>
+	<meta charset="utf-8">
+	<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+	<meta name="color-scheme" content="light dark">
+	<title>Orientation · Codex Explainer</title>
+	<link rel="stylesheet" href="assets/css/site.css">
+</head>
+<body>
+	<article class="lesson" data-module="m01-orientation.html">
+		<h1>Orientation</h1>
+		<p class="lede">
+			Before reading any code, you need a map: what Codex is as a product, how a
+			repository of 126 crates and 1.2 million lines of Rust is laid out, why one
+			executable behaves like a dozen different programs, and how the project stops
+			itself from breaking. This module is that map.
+		</p>
+
+		<section class="lesson-section" id="what-codex-is" data-minutes="8">
+			<h2>What Codex actually is</h2>
+
+			<p>
+				Codex is a coding agent from OpenAI that runs on your own machine. You type a
+				request in your terminal; a language model reads your files, proposes edits,
+				and runs commands — with your approval, inside a sandbox. The README opens by
+				stating exactly that, and immediately points at three <em>other</em> things
+				also called Codex:
+			</p>
+
+			<figure class="code">
+				<figcaption><span>README.md</span><span class="lines">lines 1–8, abridged</span></figcaption>
+				<pre><code class="language-markdown">&lt;strong&gt;Codex CLI&lt;/strong&gt; is a coding agent from OpenAI that runs locally on your computer.
+
+If you want Codex in your code editor (VS Code, Cursor, Windsurf), install in your IDE.
+If you want the desktop app experience, run `codex app`.
+If you are looking for the cloud-based agent from OpenAI, Codex Web, go to chatgpt.com/codex.</code></pre>
+			</figure>
+
+			<p>
+				That paragraph is the single most useful thing in the repository for a
+				newcomer, because it explains the shape of everything that follows. There is
+				one agent implementation, and there are four ways to reach it:
+			</p>
+
+			<figure class="diagram">
+				<div class="drow">
+					<div class="dbox"><span class="dbox-title">terminal</span><span class="dbox-sub">codex</span></div>
+					<div class="dbox"><span class="dbox-title">IDE</span><span class="dbox-sub">VS Code, Cursor</span></div>
+					<div class="dbox"><span class="dbox-title">desktop</span><span class="dbox-sub">codex app</span></div>
+					<div class="dbox faded"><span class="dbox-title">cloud</span><span class="dbox-sub">Codex Web</span></div>
+				</div>
+				<span class="darrow">↓</span>
+				<div class="drow">
+					<div class="dbox accent"><span class="dbox-title">codex-core</span><span class="dbox-sub">the agent</span></div>
+				</div>
+				<figcaption class="dcaption">
+					Four front doors, one agent. Only the cloud one lives outside this
+					repository; the other three are all built from the same binary.
+				</figcaption>
+			</figure>
+
+			<p>
+				Keep that picture. A very large fraction of this codebase is not "the agent"
+				at all — it is the machinery that lets the same agent be driven by a human at
+				a terminal, by an IDE extension over JSON-RPC, by another AI tool over MCP, or
+				by a Python script. Module&nbsp;10 is devoted to those front doors.
+			</p>
+
+			<h3>The shortest possible foothold</h3>
+
+			<p>
+				Codex ships an SDK in the language you already know. Before we go anywhere
+				near Rust, here is the entire agent, driven from Python:
+			</p>
+
+			<figure class="code">
+				<figcaption><span>sdk/python/examples/01_quickstart_constructor/sync.py</span><span class="lines">the body, imports trimmed</span></figcaption>
+				<pre><code class="language-python">from openai_codex import Codex
+
+with Codex(config=runtime_config()) as codex:
+    print("Server:", server_label(codex.metadata))
+
+    thread = codex.thread_start(model="gpt-5.4", config={"model_reasoning_effort": "high"})
+    result = thread.run("Say hello in one sentence.")
+    print("Items:", len(result.items))
+    print("Text:", result.final_response)</code></pre>
+			</figure>
+
+			<p>
+				Read that carefully, because four of its words are the vocabulary of this
+				entire course. A <strong>thread</strong> is a conversation. A
+				<strong>turn</strong> is one exchange within it — your message, plus everything
+				the model does in response. <strong>Items</strong> are the things a turn
+				produces: assistant messages, reasoning, commands run, files changed. And the
+				whole thing <strong>streams</strong>, because a turn can take minutes:
+			</p>
+
+			<figure class="code">
+				<figcaption><span>sdk/python/examples/03_turn_stream_events/sync.py</span><span class="lines">the loop, abridged</span></figcaption>
+				<pre><code class="language-python">turn = thread.turn("Explain SIMD in 3 short bullets.")
+
+for event in turn.stream():
+    if event.method == "turn/started":
+        ...
+    if event.method == "item/agentMessage/delta":
+        delta = event.payload.delta
+        ...
+    if event.method == "item/completed":
+        root = event.payload.item.root
+        if root.type == "agentMessage":
+            completed_texts.append(root.text)
+    if event.method == "turn/completed":
+        completed_status = event.payload.turn.status.value</code></pre>
+			</figure>
+
+			<aside class="concept" data-kind="llm">
+				<p class="concept-label">LLM · What makes it an <em>agent</em></p>
+				<p>
+					A plain chat completion returns text and stops. An agent runs a
+					<strong>loop</strong>: send the conversation to the model; if the model
+					replies with a request to <em>call a tool</em> ("run <code>cargo
+					test</code>", "read <code>src/main.rs</code>"), execute that request,
+					append the result to the conversation, and send it again. Repeat until the
+					model replies with prose instead of a tool call. That loop is perhaps 200
+					lines of the 1.2 million in this repository. Nearly everything else exists
+					to make those 200 lines safe, fast, resumable, and observable.
+				</p>
+			</aside>
+
+			<p>
+				Those event names — <code>turn/started</code>,
+				<code>item/agentMessage/delta</code>, <code>item/completed</code>,
+				<code>turn/completed</code> — are not an SDK invention. They are the wire
+				protocol of the Rust core, which we meet properly in Module&nbsp;4. You have
+				already seen the system's public vocabulary; the rest of the course is about
+				what happens underneath it.
+			</p>
+		</section>
+
+		<section class="lesson-section" id="repo-tour" data-minutes="9">
+			<h2>A tour of the repository</h2>
+
+			<p>
+				The root of the repository looks like this. It is worth knowing what each
+				entry is <em>before</em> you start opening things, because two of these
+				directories account for essentially the whole product and the rest are
+				scaffolding.
+			</p>
+
+			<div class="table-wrap">
+				<table>
+					<thead>
+						<tr><th>Path</th><th>What it is</th></tr>
+					</thead>
+					<tbody>
+						<tr><td><code>codex-rs/</code></td><td><strong>The product.</strong> A Cargo workspace of 126 crates and ~1.2M lines of Rust. Everything in Modules 3–11 lives here.</td></tr>
+						<tr><td><code>sdk/</code></td><td>Client libraries — <code>python/</code>, <code>typescript/</code>, and <code>python-runtime/</code>. They drive the Rust binary as a subprocess.</td></tr>
+						<tr><td><code>codex-cli/</code></td><td>The npm wrapper. This is what <code>npm install -g @openai/codex</code> installs: a small package that downloads and runs the right native binary.</td></tr>
+						<tr><td><code>docs/</code></td><td>Mostly stubs. Real user docs live at developers.openai.com; <code>AGENTS.md</code> forbids adding product docs here.</td></tr>
+						<tr><td><code>bazel/</code>, <code>MODULE.bazel</code>, <code>BUILD.bazel</code></td><td>A second build system alongside Cargo, used for CI and remote execution.</td></tr>
+						<tr><td><code>scripts/</code>, <code>tools/</code>, <code>justfile</code></td><td>Developer task running. <code>just codex</code>, <code>just fmt</code>, <code>just clippy</code>.</td></tr>
+						<tr><td><code>third_party/</code>, <code>patches/</code>, <code>flake.nix</code></td><td>Vendored code, dependency patches, and a Nix dev environment.</td></tr>
+						<tr><td><code>AGENTS.md</code></td><td>Instructions for AI agents working <em>on</em> this repo. Read it — it explains many otherwise-baffling code conventions.</td></tr>
+					</tbody>
+				</table>
+			</div>
+
+			<div class="callout note">
+				<span class="callout-label">Note</span>
+				<p>
+					<code>docs/sandbox.md</code> is three lines long and links elsewhere. Do
+					not go looking for an architecture document in this repository; there
+					isn't one. The code, the crate names, and <code>AGENTS.md</code> are the
+					documentation — which is precisely why a course like this is useful.
+				</p>
+			</div>
+
+			<h3>Inside <code>codex-rs/</code></h3>
+
+			<p>
+				126 crates is a lot, and a flat directory listing of them is genuinely
+				unhelpful. But they are not equally important. Ranked by lines of Rust, the
+				distribution is steep:
+			</p>
+
+			<div class="table-wrap">
+				<table>
+					<thead>
+						<tr><th>Crate</th><th>Lines</th><th>What it does</th><th>Module</th></tr>
+					</thead>
+					<tbody>
+						<tr><td><code>tui</code></td><td>~200,000</td><td>The terminal interface — the biggest crate in the repo</td><td>9</td></tr>
+						<tr><td><code>core</code></td><td>~180,000</td><td>The agent itself: threads, turns, the model client, tools</td><td>3, 5, 6, 7</td></tr>
+						<tr><td><code>app-server</code></td><td>~44,000</td><td>JSON-RPC daemon that IDEs and the desktop app speak to</td><td>10</td></tr>
+						<tr><td><code>core-plugins</code></td><td>~36,000</td><td>Built-in plugins layered onto core</td><td>11</td></tr>
+						<tr><td><code>app-server-protocol</code></td><td>~29,000</td><td>The types of that JSON-RPC dialect</td><td>4</td></tr>
+						<tr><td><code>exec-server</code></td><td>~28,000</td><td>A separate process that executes commands</td><td>8</td></tr>
+						<tr><td><code>protocol</code></td><td>~22,000</td><td>The shared vocabulary every crate speaks</td><td>4</td></tr>
+						<tr><td><code>config</code></td><td>~21,000</td><td>Layered configuration</td><td>11</td></tr>
+						<tr><td><code>cli</code></td><td>~21,000</td><td>Argument parsing and subcommand dispatch</td><td>3</td></tr>
+						<tr><td><code>windows-sandbox-rs</code></td><td>~19,000</td><td>The Windows sandbox implementation</td><td>8</td></tr>
+					</tbody>
+				</table>
+			</div>
+
+			<p>
+				Two crates are a third of the codebase. Learn <code>core</code> and you
+				understand Codex; learn <code>tui</code> and you understand the thing most
+				people actually touch. The remaining ~116 crates are mostly small and
+				single-purpose, and their names are honest:
+				<code>file-search</code> searches files, <code>git-utils</code> wraps git,
+				<code>terminal-detection</code> works out which terminal you're in.
+			</p>
+
+			<aside class="concept" data-kind="eng">
+				<p class="concept-label">Engineering · Why so many crates?</p>
+				<p>
+					In Python you would write this as one package with many modules, and any
+					module could import any other. A Rust workspace splits code into
+					<strong>crates</strong> — separately compiled units that must declare
+					their dependencies explicitly in a <code>Cargo.toml</code>. That costs
+					ceremony, and buys three things. Compilation is parallel and incremental,
+					so touching the TUI doesn't rebuild the sandbox. Dependencies are a
+					<em>declared, acyclic</em> graph rather than an accident, so "what does
+					this depend on?" has a real answer. And a crate boundary is a genuine API
+					boundary: items are private unless exported, which is why
+					<code>AGENTS.md</code> says "Prefer private modules and explicitly
+					exported public crate API."
+				</p>
+			</aside>
+		</section>
+
+		<section class="lesson-section" id="one-binary" data-minutes="9">
+			<h2>One binary, many front doors</h2>
+
+			<p>
+				Run <code>codex</code> and you get an interactive terminal session. But that
+				same executable is also a script runner, an MCP server, a JSON-RPC daemon, a
+				sandbox tool, a login helper, and a debugging harness. Here is a slice of the
+				subcommand list:
+			</p>
+
+			<figure class="code">
+				<figcaption><span>codex-rs/cli/src/main.rs</span><span class="lines">enum Subcommand, abridged</span></figcaption>
+				<pre><code class="language-rust">#[derive(Debug, clap::Subcommand)]
+enum Subcommand {
+    /// Run Codex non-interactively.
+    #[clap(visible_alias = "e")]
+    Exec(ExecCli),
+
+    /// Manage login.
+    Login(LoginCommand),
+
+    /// Start Codex as an MCP server (stdio).
+    McpServer(McpServerCommand),
+
+    /// [experimental] Run the app server or related tooling.
+    AppServer(AppServerCommand),
+
+    /// Launch the Desktop app (opens the app installer if missing).
+    #[cfg(any(target_os = "macos", target_os = "windows"))]
+    App(app_cmd::AppCommand),
+
+    /// Run commands within a Codex-provided sandbox.
+    Sandbox(HostSandboxArgs),
+
+    /// Resume a previous interactive session (picker by default; use --last …).
+    Resume(ResumeCommand),
+
+    /// [EXPERIMENTAL] Browse tasks from Codex Cloud and apply changes locally.
+    #[clap(name = "cloud", alias = "cloud-tasks")]
+    Cloud(CloudTasksCli),
+
+    /// Internal: run the responses API proxy.
+    #[clap(hide = true)]
+    ResponsesApiProxy(ResponsesApiProxyArgs),
+}</code></pre>
+			</figure>
+
+			<aside class="concept" data-kind="rust">
+				<p class="concept-label">Rust · Attributes and <code>enum</code></p>
+				<p>
+					The <code>#[...]</code> lines are <strong>attributes</strong> — metadata
+					attached to the item below them, closest to a Python decorator.
+					<code>#[derive(clap::Subcommand)]</code> asks the <code>clap</code> library
+					to <em>generate</em> an argument parser from this type at compile time, so
+					this enum <em>is</em> the CLI specification. <code>#[cfg(...)]</code> is
+					conditional compilation: the <code>App</code> variant does not exist at all
+					on Linux. And a Rust <code>enum</code> is not Python's <code>Enum</code> —
+					each variant can carry different data (<code>Exec</code> carries an
+					<code>ExecCli</code>, <code>Update</code> carries nothing). Module&nbsp;2
+					covers this properly; it is the single most important Rust construct for
+					reading this codebase.
+				</p>
+			</aside>
+
+			<p>
+				Note the doc comments. In Rust, <code>///</code> above an item is documentation,
+				and <code>clap</code> lifts those strings straight into <code>codex
+				--help</code>. The help text you see in your terminal is the source you are
+				reading.
+			</p>
+
+			<h3>The arg0 trick</h3>
+
+			<p>
+				There is a subtler multiplexing going on. Codex ships as a
+				<em>single</em> executable, but internally it needs to invoke a separate
+				sandbox helper program. Rather than shipping two binaries, it checks the name
+				it was invoked under:
+			</p>
+
+			<figure class="code">
+				<figcaption><span>codex-rs/arg0/src/lib.rs</span><span class="lines">doc comment on arg0_dispatch_or_else</span></figcaption>
+				<pre><code class="language-rust">/// While we want to deploy the Codex CLI as a single executable for simplicity,
+/// we also want to expose some of its functionality as distinct CLIs, so we use
+/// the "arg0 trick" to determine which CLI to dispatch. This effectively allows
+/// us to simulate deploying multiple executables as a single binary on Mac and
+/// Linux (but not Windows).
+///
+/// When the current executable is invoked through the hard-link or alias named
+/// `codex-linux-sandbox` we *directly* execute
+/// [`codex_linux_sandbox::run_main`] (which never returns). Otherwise we:
+///
+/// 1.  Load `.env` values from `~/.codex/.env` before creating any threads.
+/// 2.  Spawn a main runtime thread with a controlled stack size.
+/// 3.  Construct a Tokio multi-thread runtime.
+/// 4.  Capture the current executable path and derive the
+///     `codex-linux-sandbox` helper path …
+/// 5.  Execute the provided async `main_fn` inside that runtime …</code></pre>
+			</figure>
+
+			<aside class="concept" data-kind="os">
+				<p class="concept-label">OS · What "arg0" means</p>
+				<p>
+					When any program starts, the operating system hands it a list of
+					arguments, and slot zero is <em>the name it was invoked as</em> — not the
+					file on disk. In Python that's <code>sys.argv[0]</code>. Because a hard
+					link lets one file on disk have several names, a program can look at
+					<code>argv[0]</code> and behave like a completely different tool. BusyBox
+					famously packs a hundred Unix utilities into one binary this way. Codex
+					uses it for exactly one thing: when invoked as
+					<code>codex-linux-sandbox</code>, become the sandbox helper instead of the
+					agent.
+				</p>
+			</aside>
+
+			<p>
+				And <code>main</code> itself is almost nothing — it hands control straight to
+				that dispatcher:
+			</p>
+
+			<figure class="code">
+				<figcaption><span>codex-rs/cli/src/main.rs</span><span class="lines">lines 958–964</span></figcaption>
+				<pre><code class="language-rust">fn main() -&gt; anyhow::Result&lt;()&gt; {
+    let remote_control_disabled = codex_app_server::take_remote_control_disabled_env();
+    arg0_dispatch_or_else(move |arg0_paths: Arg0DispatchPaths| async move {
+        cli_main(arg0_paths, remote_control_disabled).await?;
+        Ok(())
+    })
+}</code></pre>
+			</figure>
+
+			<p>
+				Three things to notice, all of which Module&nbsp;2 explains. <code>main</code>
+				returns a <code>Result</code> — it can fail, and the failure is a value, not an
+				exception. The closure is marked <code>async move</code>, so it is a
+				<em>description</em> of work that <code>arg0_dispatch_or_else</code> will later
+				run on a Tokio runtime it builds itself. And the <code>?</code> after
+				<code>await</code> means "if that failed, return the error to my caller."
+			</p>
+
+			<div class="callout deeper">
+				<span class="callout-label">Go deeper (optional)</span>
+				<p>
+					The stack-size detail in step 2 is real engineering scar tissue.
+					<code>Runtime::block_on</code> runs the top-level future on whatever stack
+					the OS gave <code>main</code>, which is often smaller than a Tokio worker's.
+					Deeply nested async state machines overflowed it, so Codex spawns a thread
+					with an explicit 8&nbsp;MiB stack and runs everything there. You will find
+					comments like this all over the repo; they are the best kind of
+					documentation.
+				</p>
+			</div>
+		</section>
+
+		<section class="lesson-section" id="architecture" data-minutes="8">
+			<h2>The layered architecture</h2>
+
+			<p>
+				Crate dependencies are declared, so the architecture is not a matter of
+				opinion — you can read it out of the <code>Cargo.toml</code> files. Here is the
+				spine, from the bottom up:
+			</p>
+
+			<figure class="diagram">
+				<div class="drow">
+					<div class="dbox"><span class="dbox-title">cli</span><span class="dbox-sub">argv → dispatch</span></div>
+				</div>
+				<span class="darrow">↓</span>
+				<div class="drow keep-row">
+					<div class="dbox"><span class="dbox-title">tui</span><span class="dbox-sub">terminal UI</span></div>
+					<div class="dbox"><span class="dbox-title">exec</span><span class="dbox-sub">scripted</span></div>
+					<div class="dbox"><span class="dbox-title">SDKs</span><span class="dbox-sub">py / ts</span></div>
+				</div>
+				<span class="darrow">↓ <span class="dlabel">ClientRequest / ServerNotification</span></span>
+				<div class="drow">
+					<div class="dbox"><span class="dbox-title">app-server</span><span class="dbox-sub">in-process or remote</span></div>
+				</div>
+				<span class="darrow">↓ <span class="dlabel">Op / Event</span></span>
+				<div class="drow">
+					<div class="dbox accent"><span class="dbox-title">core</span><span class="dbox-sub">threads, turns, tools, model client</span></div>
+				</div>
+				<span class="darrow">↓</span>
+				<div class="drow">
+					<div class="dbox"><span class="dbox-title">protocol</span><span class="dbox-sub">the vocabulary</span></div>
+					<div class="dbox"><span class="dbox-title">config</span><span class="dbox-sub">settings</span></div>
+					<div class="dbox"><span class="dbox-title">sandboxing</span><span class="dbox-sub">the cage</span></div>
+					<div class="dbox"><span class="dbox-title">rollout</span><span class="dbox-sub">persistence</span></div>
+				</div>
+				<figcaption class="dcaption">
+					Front doors on top, the agent in the middle, shared primitives below.
+					Note the two distinct protocols — that boundary is the surprise of this
+					architecture.
+				</figcaption>
+			</figure>
+
+			<p>
+				The load-bearing observation is that <strong>the front doors do not depend on
+				each other</strong>, and <code>core</code> does not depend on any of them.
+				<code>core</code> has no idea whether a human, an IDE, or a Python script is
+				driving it. That is why the same agent can be four products.
+			</p>
+
+			<div class="callout warn">
+				<span class="callout-label">Careful</span>
+				<p>
+					The obvious guess about that diagram is wrong, and it is worth correcting
+					now. You would expect the terminal UI to call <code>core</code> directly —
+					same process, why not? It doesn't. Search the entire <code>tui</code> crate
+					for <code>CodexThread</code>, <code>core</code>'s main handle, and you get
+					<strong>zero hits</strong>. The TUI talks to an
+					<code>AppServerClient</code>, exactly like the IDE extension does.
+				</p>
+			</div>
+
+			<figure class="code">
+				<figcaption><span>codex-rs/app-server-client/src/lib.rs</span><span class="lines">lines 450–453</span></figcaption>
+				<pre><code class="language-rust">pub enum AppServerClient {
+    InProcess(InProcessAppServerClient),
+    Remote(RemoteAppServerClient),
+}</code></pre>
+			</figure>
+
+			<p>
+				That two-variant enum is the whole trick. <code>InProcess</code> runs the
+				server as a task inside the same process — no sockets, no serialisation, just
+				channels. <code>Remote</code> talks to a separate <code>codex app-server</code>
+				process. Callers are written against one interface and cannot tell which they
+				got, which means the terminal UI and the VS&nbsp;Code extension exercise
+				<em>the same code path</em>. There is no "local shortcut" that could quietly
+				drift and break only for IDE users. Module&nbsp;10 returns to this in depth.
+			</p>
+
+			<p>
+				You can see the layering in the dependency lists themselves. Both
+				<code>core</code> and <code>tui</code> depend on <code>codex-protocol</code>,
+				<code>codex-config</code>, <code>codex-login</code>, and
+				<code>codex-sandboxing</code> — shared foundations. But only <code>core</code>
+				depends on <code>codex-apply-patch</code>, <code>codex-execpolicy</code>, and
+				<code>codex-rmcp-client</code>, because only <code>core</code> executes tools:
+			</p>
+
+			<figure class="code">
+				<figcaption><span>codex-rs/core/Cargo.toml</span><span class="lines">workspace deps, abridged</span></figcaption>
+				<pre><code class="language-toml">codex-apply-patch = { workspace = true }
+codex-config = { workspace = true }
+codex-execpolicy = { workspace = true }
+codex-login = { workspace = true }
+codex-mcp = { workspace = true }
+codex-model-provider = { workspace = true }
+codex-protocol = { workspace = true }
+codex-rmcp-client = { workspace = true }
+codex-rollout = { workspace = true }
+codex-sandboxing = { workspace = true }</code></pre>
+			</figure>
+
+			<aside class="concept" data-kind="eng">
+				<p class="concept-label">Engineering · Read the Cargo.toml first</p>
+				<p>
+					This is a technique worth stealing. When you meet an unfamiliar Rust crate,
+					open its <code>Cargo.toml</code> before any <code>.rs</code> file. The
+					dependency list tells you what the crate is <em>allowed</em> to do. A crate
+					that doesn't depend on <code>reqwest</code> cannot make network calls; one
+					that doesn't depend on <code>codex-protocol</code> isn't part of the agent
+					conversation. It's a 30-second read that saves an hour of grepping. Python
+					has no equivalent — any module can import anything at runtime.
+				</p>
+			</aside>
+
+			<p>
+				There is one wrinkle worth flagging now so it doesn't surprise you later:
+				<code>tui</code> also depends on <code>codex-app-server-client</code> and
+				<code>codex-app-server-protocol</code>. The terminal UI does not always call
+				<code>core</code> directly in-process; it can speak the same JSON-RPC protocol
+				the IDE uses. Module&nbsp;10 unpicks why.
+			</p>
+		</section>
+
+		<section class="lesson-section" id="honest" data-minutes="8">
+			<h2>How the project keeps itself honest</h2>
+
+			<p>
+				A codebase this size, changing this fast, with the power to run arbitrary
+				commands on your machine, needs strong guardrails. Codex leans on four.
+			</p>
+
+			<h3>1. Tests, and a lot of them</h3>
+
+			<p>
+				1,158 files under <code>codex-rs/</code> contain test functions, and there are
+				664 snapshot files on disk. In Rust, tests usually live in the <em>same
+				file</em> as the code they test, at the bottom, behind an attribute:
+			</p>
+
+			<figure class="code">
+				<figcaption><span class="lines">the standard shape of a Rust test module</span></figcaption>
+				<pre><code class="language-rust">#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parses_a_simple_command() { /* … */ }
+
+    #[tokio::test]
+    async fn streams_events_in_order() { /* … */ }
+}</code></pre>
+			</figure>
+
+			<p>
+				<code>#[cfg(test)]</code> means this module is compiled only when running
+				tests, so it costs nothing in the shipped binary. <code>#[tokio::test]</code>
+				is for async tests — it builds a runtime around the test body. Codex also
+				pulls large test suites into sibling files such as
+				<code class="path">codex-rs/core/src/exec_policy_tests.rs</code>; when you
+				meet a <code>*_tests.rs</code> file, that is what it is.
+			</p>
+
+			<aside class="concept" data-kind="eng">
+				<p class="concept-label">Engineering · Snapshot testing</p>
+				<p>
+					664 <code>.snap</code> files come from <code>insta</code>, a snapshot
+					testing library. Instead of writing an expected value by hand, you assert
+					that some output matches a stored file. First run, the file is created; on
+					later runs, any difference fails the test and shows a diff you accept or
+					reject. This is how you test something like a terminal UI, where the
+					"expected value" is forty lines of styled text nobody wants to type into a
+					test. Python's closest equivalent is <code>pytest-regressions</code> or
+					<code>syrupy</code>.
+				</p>
+			</aside>
+
+			<h3>2. A linter that encodes design decisions</h3>
+
+			<p>
+				Rust's linter, <code>clippy</code>, is configurable — and Codex uses it to
+				enforce rules a compiler could never know about:
+			</p>
+
+			<figure class="code">
+				<figcaption><span>codex-rs/clippy.toml</span><span class="lines">rewrapped to fit</span></figcaption>
+				<pre><code class="language-toml">allow-expect-in-tests = true
+allow-unwrap-in-tests = true
+await-holding-invalid-types = [
+    "tokio::sync::MutexGuard",
+    "tokio::sync::RwLockReadGuard",
+    "tokio::sync::RwLockWriteGuard",
+]
+disallowed-methods = [
+    { path = "ratatui::style::Color::Rgb",
+      reason = "Use ANSI colors, which work better in various terminal themes." },
+    { path = "ratatui::style::Color::Indexed",
+      reason = "Use ANSI colors, which work better in various terminal themes." },
+    { path = "ratatui::style::Stylize::white",
+      reason = "Avoid hardcoding white; prefer default fg or dim/bold." },
+    { path = "ratatui::style::Stylize::black",
+      reason = "Avoid hardcoding black; prefer default fg or dim/bold." },
+    { path = "ratatui::style::Stylize::yellow",
+      reason = "Avoid yellow; prefer other colors in `tui/styles.md`." },
+]</code></pre>
+			</figure>
+
+			<p>
+				Read this as a list of bugs the team got tired of. Someone hardcoded white
+				text and it vanished on a light-background terminal; now the linter refuses
+				it. And <code>await-holding-invalid-types</code> is the good one:
+			</p>
+
+			<aside class="concept" data-kind="rust">
+				<p class="concept-label">Rust · Why holding a lock across <code>await</code> is a bug</p>
+				<p>
+					<code>await</code> is a point where your task can be <em>suspended</em> and
+					the thread goes off to run something else. If you are holding a mutex when
+					that happens, you keep holding it while suspended — potentially for a
+					network round trip — and every other task that wants it stalls. Worse, if
+					the task you're waiting on needs that same lock, you deadlock. This is a
+					classic async mistake in every language; Codex makes it a compile-time
+					lint. Module&nbsp;2 covers <code>await</code>.
+				</p>
+			</aside>
+
+			<h3>3. A pinned toolchain</h3>
+
+			<figure class="code">
+				<figcaption><span>codex-rs/rust-toolchain.toml</span><span class="lines">complete</span></figcaption>
+				<pre><code class="language-toml">[toolchain]
+channel = "1.95.0"
+components = ["clippy", "rustfmt", "rust-src"]</code></pre>
+			</figure>
+
+			<p>
+				Every contributor and every CI machine compiles with the same Rust version,
+				chosen deliberately rather than "whatever was installed". If you clone this
+				repo, <code>rustup</code> reads this file and fetches 1.95.0 for you.
+			</p>
+
+			<h3>4. <code>AGENTS.md</code> — rules for the robots</h3>
+
+			<p>
+				This one is unusual enough to be worth your time. <code>AGENTS.md</code> is a
+				file of instructions for AI agents working on this codebase — including Codex
+				itself. It is where the conventions live:
+			</p>
+
+			<figure class="code">
+				<figcaption><span>AGENTS.md</span><span class="lines">selected rules</span></figcaption>
+				<pre><code class="language-markdown">- Crate names are prefixed with `codex-`. For example, the `core` folder's
+  crate is named `codex-core`
+- Never add or modify any code related to `CODEX_SANDBOX_NETWORK_DISABLED_ENV_VAR`
+  or `CODEX_SANDBOX_ENV_VAR`.
+- When possible, make `match` statements exhaustive and avoid wildcard arms.
+- Prefer private modules and explicitly exported public crate API.
+- If you change `ConfigToml` or nested config types, run `just write-config-schema`
+  to update `codex-rs/core/config.schema.json`.
+- When writing tests, prefer comparing the equality of entire objects over
+  fields one by one.</code></pre>
+			</figure>
+
+			<p>
+				The first rule explains a naming quirk you will trip over constantly: the
+				<em>directory</em> is <code>core/</code> but the <em>crate</em> is
+				<code>codex-core</code>, and in Rust source the underscore form
+				<code>codex_core</code> is what you <code>use</code>. Three names for one
+				thing. Module&nbsp;2 explains the underscore/hyphen conversion.
+			</p>
+
+			<p>
+				The sandbox rule is a genuine hazard sign. Codex is developed <em>using</em>
+				Codex, inside its own sandbox, so parts of the test suite detect that they are
+				sandboxed and skip themselves. An agent that "helpfully" cleaned up those
+				checks would silently disable tests. Module&nbsp;8 returns to this.
+			</p>
+
+			<details class="digression">
+				<summary>Why is there a Bazel build as well as Cargo?</summary>
+				<div class="digression-body">
+					<p>
+						Cargo is Rust's native build tool and is what you will use locally
+						(<code>just codex</code> runs <code>cargo run</code>). Bazel is a
+						language-agnostic build system with aggressive caching and remote
+						execution — it can distribute a build across a fleet and reuse artifacts
+						across machines, which matters when a full build is a million lines of
+						Rust plus TypeScript plus Python. The cost is that both must be kept in
+						sync, which is why <code>AGENTS.md</code> says changing
+						<code>Cargo.toml</code> requires running <code>just
+						bazel-lock-update</code>. You can ignore Bazel entirely for this course.
+					</p>
+				</div>
+			</details>
+
+			<h3>What you now know</h3>
+
+			<p>
+				Codex is one agent behind four front doors; the repository is a 126-crate Cargo
+				workspace where <code>core</code> and <code>tui</code> are a third of the code;
+				one binary multiplexes a dozen tools via subcommands and the arg0 trick;
+				dependencies are declared, so the architecture is readable from
+				<code>Cargo.toml</code> files; and the project defends itself with tests,
+				snapshots, an opinionated linter, a pinned toolchain, and a rulebook for AI
+				contributors.
+			</p>
+
+			<p>
+				Everything from here on involves reading Rust. The next module teaches exactly
+				as much as this course needs — no more — starting from what you already know
+				in Python.
+			</p>
+		</section>
+	</article>
+	<script src="manifest.js"></script>
+	<script src="assets/vendor/highlight.min.js"></script>
+	<script src="assets/js/app.js" defer></script>
+</body>
+</html>

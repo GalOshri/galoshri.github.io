@@ -1,0 +1,118 @@
+<!doctype html>
+<html lang="en">
+<head>
+	<meta charset="utf-8">
+	<meta name="viewport" content="width=device-width, initial-scale=1">
+	<title>Streaming Markdown · pi · Codebase Academy</title>
+	<link rel="stylesheet" href="../assets/css/site.css">
+</head>
+<body>
+	<article class="lesson">
+		<h1>Streaming Markdown</h1>
+		<p class="lede">
+			The last component closes the last gap in the Module 2 trace: the
+			model's prose, arriving as raw Markdown fragments, becomes styled
+			terminal text <em>while incomplete</em>. Rendering a format designed
+			for finished documents, fifty times a second, mid-sentence — that's
+			the trick.
+		</p>
+
+		<h2>The pipeline when nothing is moving</h2>
+		<p>
+			At rest, it's a textbook three-stage pipeline. The <code>Markdown</code>
+			component wraps the <code>marked</code> library's <em>lexer</em> —
+			one of pi-tui's two external dependencies (lesson 1.4), because a
+			CommonMark tokenizer is exactly the kind of solved-problem bulk you
+			buy rather than build. Marked turns text into a token tree (heading,
+			paragraph, code fence, list…); pi's own renderer walks the tokens and
+			emits ANSI-styled lines — bold, colors, indent for lists, syntax
+			highlighting inside code fences via the theme system; and the result
+			is, of course, just <code>render(width) → string[]</code>. Buy the
+			parser, own the renderer: the renderer is where terminal-specific
+			decisions live (how wide is a heading underline? what does a
+			blockquote look like in text?), so that's the part worth owning.
+		</p>
+
+		<h2>The problem: Markdown mid-flight</h2>
+		<p>
+			Streaming breaks the textbook. Every <code>text_delta</code> (lesson
+			2.4) leaves the accumulated text in some torn state:
+		</p>
+		<figure class="code">
+			<figcaption><span>the model, mid-thought</span><span class="lines">what the component must render beautifully</span></figcaption>
+			<pre><code class="language-text">Here are the key points:
+
+1. The `package.json` file defines
+2. Your dependencies are **pinned, which
+
+```typescript
+export function repairJs</code></pre>
+		</figure>
+		<p>
+			An unclosed bold, a dangling list item, and — worst — an unterminated
+			code fence. Feed that to a naive parser and everything after
+			<code>```typescript</code> is "code," so the <em>entire rest of the
+			message</em> renders as a code block until the closing fence arrives…
+			then snaps back to prose. Multiply by fifty updates a second and you
+			get strobing.
+		</p>
+
+		<h2>The fixes: tolerance, and stability</h2>
+		<p>Two kinds of countermeasure, both instructive:</p>
+		<ul>
+			<li>
+				<strong>Heal the tear before parsing.</strong> Helpers like
+				<code>trimPartialClosingFences</code> pre-process the partial text —
+				treating a trailing unclosed fence as closed-for-now, so the
+				half-written code block renders <em>as</em> a code block without
+				swallowing what follows. The parse is of a lightly fictionalized
+				document that looks like what the true document will become.
+			</li>
+			<li>
+				<strong>Keep rendered prefixes stable.</strong> The renderer's
+				choices are biased so that already-emitted lines don't change when
+				more text arrives — because stable lines are exactly what the
+				differential renderer (9.2) rewards. If a delta only extends the
+				last paragraph, only the last line or two of the component's output
+				differ, and the repaint is tiny. The component and the renderer
+				are co-designed around the same diff.
+			</li>
+		</ul>
+		<p>
+			There's even a custom <code>marked</code> tokenizer subclass
+			(a stricter strikethrough rule) — patching the <em>parser's</em>
+			opinions where terminal reality disagrees. Wrapping a dependency and
+			adjusting its behavior at the edges, rather than forking it: the
+			adapter instinct (4.1), one last time.
+		</p>
+
+		<div class="callout note">
+			<span class="callout-label">Note · the full trace, now gap-free</span>
+			<p>
+				Walk lesson 2's journey once more, with nothing hidden: SSE bytes →
+				adapter events (4.2) → <code>text_delta</code> with a partial
+				message (3.4) → loop emits <code>message_update</code> (5.2) →
+				awaited broadcast (5.4) → the chat's Markdown component re-renders
+				its healed, stable lines (this lesson) → 16ms throttle →
+				string diff → a few dozen bytes of ANSI inside a
+				synchronized-output frame (9.2) → your eyes. You can now name
+				every arrow in the system's most-traveled path.
+			</p>
+		</div>
+
+		<h2>Module 9, closed — and the code, complete</h2>
+		<p>
+			The TUI module ends the codebase proper: components as line-producing
+			functions, a diffing renderer, three generations of keyboard
+			protocol, a maximalist editor, and streaming-tolerant Markdown.
+			Between Modules 3 and 9 you've now read every layer pi is made of.
+			What remains is the short appendix — pi as a machine-controlled
+			subprocess, the experimental orchestrator, and where you might go
+			from here.
+		</p>
+	</article>
+	<script src="../manifest.js"></script>
+	<script src="../assets/vendor/highlight.min.js"></script>
+	<script src="../assets/js/app.js" defer></script>
+</body>
+</html>

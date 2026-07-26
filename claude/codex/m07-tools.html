@@ -1,0 +1,579 @@
+<!doctype html>
+<html lang="en">
+<head>
+	<meta charset="utf-8">
+	<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+	<meta name="color-scheme" content="light dark">
+	<title>Tools — Giving the Model Hands · Codex Explainer</title>
+	<link rel="stylesheet" href="assets/css/site.css">
+</head>
+<body>
+	<article class="lesson" data-module="m07-tools.html">
+		<h1>Tools — Giving the Model Hands</h1>
+		<p class="lede">
+			A language model can only emit text. Everything else — reading your files,
+			running your tests, editing your code — happens because Codex offers it a menu of
+			functions and executes whichever it picks. This module is that menu: how tools
+			are declared, dispatched, and executed, and why the edit format is a bespoke
+			diff dialect with its own grammar file.
+		</p>
+
+		<section class="lesson-section" id="registry" data-minutes="9">
+			<h2>The tool registry</h2>
+
+			<p>
+				Every tool implements one trait, and the trait's optional methods are a good
+				summary of what varies between tools:
+			</p>
+
+			<figure class="code">
+				<figcaption><span>codex-rs/core/src/tools/registry.rs</span><span class="lines">CoreToolRuntime, abridged</span></figcaption>
+				<pre><code class="language-rust">pub(crate) trait CoreToolRuntime: ToolExecutor&lt;ToolInvocation&gt; {
+    fn matches_kind(&amp;self, payload: &amp;ToolPayload) -&gt; bool {
+        matches!(
+            payload,
+            ToolPayload::Function { .. } | ToolPayload::ToolSearch { .. }
+        )
+    }
+
+    /// Whether cancellation should let the handler finish teardown before the
+    /// host returns an aborted tool response.
+    fn waits_for_runtime_cancellation(&amp;self) -&gt; bool {
+        false
+    }
+
+    fn telemetry_tags&lt;'a&gt;(
+        &amp;'a self,
+        _invocation: &amp;'a ToolInvocation,
+    ) -&gt; BoxFuture&lt;'a, ToolTelemetryTags&gt; {
+        Box::pin(async { Vec::new() })
+    }
+}</code></pre>
+			</figure>
+
+			<aside class="concept" data-kind="rust">
+				<p class="concept-label">Rust · Default method bodies</p>
+				<p>
+					Every method here has a body, so implementers get sensible behaviour for
+					free and override only what differs. This is exactly Python's "define a
+					method on the base class" — but note the supertrait bound
+					<code>: ToolExecutor&lt;ToolInvocation&gt;</code>, which is the one method
+					with <em>no</em> default. A tool may skip everything else; it must supply
+					execution.
+				</p>
+			</aside>
+
+			<p>
+				<code>waits_for_runtime_cancellation</code> is a small door into a real problem.
+				When you hit <kbd>Esc</kbd>, most tools should die immediately. But a tool
+				holding a PTY, or a half-written file, needs a moment to clean up — so it can
+				opt in to being asked nicely first.
+			</p>
+
+			<p>
+				The registry itself is a lookup table built from a list:
+			</p>
+
+			<figure class="code">
+				<figcaption><span>codex-rs/core/src/tools/registry.rs</span><span class="lines">ToolRegistry</span></figcaption>
+				<pre><code class="language-rust">pub struct ToolRegistry { /* … */ }
+
+impl ToolRegistry {
+    pub(crate) fn from_tools(
+        tools: impl IntoIterator&lt;Item = Arc&lt;dyn CoreToolRuntime&gt;&gt;,
+    ) -&gt; Self { /* … */ }
+
+    pub(crate) fn tool_exposure(&amp;self, name: &amp;ToolName) -&gt; Option&lt;ToolExposure&gt; {
+        /* … */
+    }
+
+    pub(crate) fn supports_parallel_tool_calls(&amp;self, name: &amp;ToolName) -&gt; Option&lt;bool&gt; {
+        /* … */
+    }
+}</code></pre>
+			</figure>
+
+			<p>
+				<code>Arc&lt;dyn CoreToolRuntime&gt;</code> — the runtime-dispatch pattern from
+				Module&nbsp;2 — because which tools exist is decided per turn, not at compile
+				time. <code>supports_parallel_tool_calls</code> matters: reading three files at
+				once is safe and fast; running three <code>git commit</code>s at once is not.
+				There is a whole file for this,
+				<code class="path">codex-rs/core/src/tools/parallel.rs</code>.
+			</p>
+
+			<p>
+				The full tool list is the directory listing of
+				<code class="path">codex-rs/core/src/tools/handlers</code>:
+			</p>
+
+			<div class="table-wrap">
+				<table>
+					<thead>
+						<tr><th>Handler</th><th>What it gives the model</th></tr>
+					</thead>
+					<tbody>
+						<tr><td><code>shell</code>, <code>unified_exec</code></td><td>Run commands; interactive sessions</td></tr>
+						<tr><td><code>apply_patch</code></td><td>Edit files</td></tr>
+						<tr><td><code>view_image</code></td><td>Put an image into the conversation</td></tr>
+						<tr><td><code>mcp</code>, <code>mcp_resource</code></td><td>Tools and resources from MCP servers</td></tr>
+						<tr><td><code>request_permissions</code>, <code>request_user_input</code></td><td>Ask you for something mid-turn</td></tr>
+						<tr><td><code>get_context_remaining</code>, <code>new_context_window</code></td><td>Let the model see and manage its own budget</td></tr>
+						<tr><td><code>tool_search</code></td><td>Find tools that weren't loaded upfront</td></tr>
+						<tr><td><code>multi_agents</code>, <code>multi_agents_v2</code></td><td>Spawn sub-agents</td></tr>
+						<tr><td><code>sleep</code>, <code>wait_for_environment</code>, <code>current_time</code></td><td>Wait, and know what time it is</td></tr>
+						<tr><td><code>request_plugin_install</code>, <code>list_available_plugins_to_install</code></td><td>Extend itself</td></tr>
+					</tbody>
+				</table>
+			</div>
+
+			<aside class="concept" data-kind="llm">
+				<p class="concept-label">LLM · Why <code>tool_search</code> exists</p>
+				<p>
+					Every tool definition costs tokens in every request, forever. Twenty tools
+					with detailed schemas can be thousands of tokens before you have said
+					anything. <code>tool_search</code> inverts this: expose a handful of tools
+					plus a way to <em>look up</em> the rest on demand. The
+					<code>deferred_tool_namespaces</code> method on the registry is the other
+					half of that mechanism. It is the same instinct as compaction in
+					Module&nbsp;5 — context is the scarce resource.
+				</p>
+			</aside>
+		</section>
+
+		<section class="lesson-section" id="shell-tool" data-minutes="9">
+			<h2>The shell tool</h2>
+
+			<p>
+				Tool definitions are built in code, not written as JSON, which means they can
+				branch on platform and configuration:
+			</p>
+
+			<figure class="code">
+				<figcaption><span>codex-rs/core/src/tools/handlers/shell_spec.rs</span><span class="lines">the parameter schema, abridged</span></figcaption>
+				<pre><code class="language-rust">let mut properties = BTreeMap::from([
+    (
+        "cmd".to_string(),
+        JsonSchema::string(Some("Shell command to execute.".to_string())),
+    ),
+    (
+        "workdir".to_string(),
+        JsonSchema::string(Some(
+            "Working directory for the command. Defaults to the turn cwd."
+                .to_string(),
+        )),
+    ),
+    (
+        "tty".to_string(),
+        JsonSchema::boolean(Some(
+            "True allocates a PTY for the command; false or omitted uses plain pipes."
+                .to_string(),
+        )),
+    ),
+    (
+        "yield_time_ms".to_string(),
+        JsonSchema::number(Some(yield_time_ms_description.to_string())),
+    ),
+]);</code></pre>
+			</figure>
+
+			<p>
+				Those description strings are not documentation for you — they are
+				<em>prompt</em>. The model reads them to decide how to call the tool, so every
+				word is load-bearing. Look at what happens when the guidance is
+				platform-specific:
+			</p>
+
+			<figure class="code">
+				<figcaption><span>codex-rs/core/src/tools/handlers/shell_spec.rs</span><span class="lines">platform-specific prompt text</span></figcaption>
+				<pre><code class="language-rust">let yield_time_ms_description = if cfg!(windows) {
+    "Maximum time to wait before returning a session ID for a still-running \
+     command. … Effective range on Windows is 2000-30000 ms. Set a shorter \
+     value only when intentionally starting a long-lived or interactive \
+     process and you want a session ID promptly."
+} else {
+    "Wait before yielding output. Defaults to 10000 ms; effective range is \
+     250-30000 ms."
+};</code></pre>
+			</figure>
+
+			<aside class="concept" data-kind="os">
+				<p class="concept-label">OS · Why Windows needs a longer floor</p>
+				<p>
+					Process creation on Windows is substantially more expensive than
+					<code>fork</code>/<code>exec</code> on Unix, and console handling differs.
+					A 250&nbsp;ms yield that works fine on macOS would, on Windows, routinely
+					return "still running" for commands that were about to finish. Rather than
+					pick one number and be wrong somewhere, Codex tells the model different
+					truths on different platforms.
+				</p>
+			</aside>
+
+			<p>
+				<code>yield_time_ms</code> also reveals the shell tool's real design. It does
+				not block until a command finishes — it waits a while, and if the command is
+				still running, returns a <em>session id</em>. That is what makes long-running
+				processes possible: <code>npm run dev</code> keeps running, the model gets a
+				handle, and Module&nbsp;5's <code>list_background_terminals</code> and
+				<code>terminate_background_terminal</code> on <code>CodexThread</code> exist to
+				manage the result.
+			</p>
+
+			<p>
+				<code>max_output_tokens</code> is the other guard: <em>"Output token budget.
+				Defaults to 10000 tokens; larger requests may be capped by policy."</em> A
+				single <code>cat</code> of a large log could otherwise blow the entire context
+				window in one tool call.
+			</p>
+		</section>
+
+		<section class="lesson-section" id="apply-patch" data-minutes="10">
+			<h2>apply_patch: the edit format</h2>
+
+			<p>
+				Codex does not let the model write files directly, and it does not use
+				<code>git diff</code> format. It defines its own patch dialect — and, unusually,
+				ships a formal grammar for it:
+			</p>
+
+			<figure class="code">
+				<figcaption><span>codex-rs/core/src/tools/handlers/apply_patch.lark</span><span class="lines">complete</span></figcaption>
+				<pre><code class="language-lark">start: begin_patch hunk+ end_patch
+begin_patch: "*** Begin Patch" LF
+end_patch: "*** End Patch" LF?
+
+hunk: add_hunk | delete_hunk | update_hunk
+add_hunk: "*** Add File: " filename LF add_line+
+delete_hunk: "*** Delete File: " filename LF
+update_hunk: "*** Update File: " filename LF change_move? change?
+
+filename: /(.+)/
+add_line: "+" /(.*)/ LF -&gt; line
+
+change_move: "*** Move to: " filename LF
+change: (change_context | change_line)+ eof_line?
+change_context: ("@@" | "@@ " /(.+)/) LF
+change_line: ("+" | "-" | " ") /(.*)/ LF
+eof_line: "*** End of File" LF
+
+%import common.LF</code></pre>
+			</figure>
+
+			<p>
+				Seventeen lines that define the entire edit language. A patch is a
+				<code>Begin</code>/<code>End</code> envelope containing hunks; each hunk adds,
+				deletes, or updates one file; an update may rename; changed lines are prefixed
+				<code>+</code>, <code>-</code>, or space.
+			</p>
+
+			<aside class="concept" data-kind="eng">
+				<p class="concept-label">Engineering · Why not unified diff?</p>
+				<p>
+					A <code>git</code> unified diff identifies edits by <em>line numbers</em>
+					(<code>@@ -42,7 +42,9 @@</code>). A model cannot reliably count lines, and if
+					it is off by two, the patch either fails or — worse — applies in the wrong
+					place. Codex's format identifies edits by <em>surrounding context</em>
+					instead: show me three lines either side and I will find them. That is a
+					format designed around what language models are good at, and it is one of
+					the more consequential design decisions in the product.
+				</p>
+			</aside>
+
+			<p>
+				The model learns this format from a prompt template that is shipped as Markdown
+				and embedded with <code>include_str!</code>:
+			</p>
+
+			<figure class="code">
+				<figcaption><span>codex-rs/prompts/templates/apply_patch_tool_instructions.md</span><span class="lines">abridged</span></figcaption>
+				<pre><code class="language-markdown">Your patch language is a stripped-down, file-oriented diff format designed
+to be easy to parse and safe to apply.
+
+*** Add File: &lt;path&gt; - create a new file. Every following line is a + line.
+*** Delete File: &lt;path&gt; - remove an existing file. Nothing follows.
+*** Update File: &lt;path&gt; - patch an existing file in place (optionally rename).
+
+- By default, show 3 lines of code immediately above and 3 lines immediately
+  below each change.
+- If 3 lines of context is insufficient to uniquely identify the snippet,
+  use the @@ operator to indicate the class or function to which the snippet
+  belongs. For instance:
+
+@@ class BaseClass
+[3 lines of pre-context]
+- [old_code]
++ [new_code]
+[3 lines of post-context]</code></pre>
+			</figure>
+
+			<p>
+				The <code>@@ class BaseClass</code> mechanism is the escape hatch for repeated
+				code: name the enclosing scope, and stack several <code>@@</code> lines to
+				narrow further. It is addressing-by-description rather than by position.
+			</p>
+
+			<p>
+				Applying it needs fuzzy matching, which is why the crate has a module called
+				<code>seek_sequence</code> alongside the parser:
+			</p>
+
+			<figure class="code">
+				<figcaption><span>codex-rs/apply-patch/src/lib.rs</span><span class="lines">the module list</span></figcaption>
+				<pre><code class="language-rust">mod invocation;
+mod parser;
+mod seek_sequence;
+mod standalone_executable;
+mod streaming_parser;</code></pre>
+			</figure>
+
+			<p>
+				<code>streaming_parser</code> is the one to notice. Remember
+				<code>ToolCallInputDelta</code> from Module&nbsp;6 — tool arguments arrive
+				character by character. A streaming parser can validate a patch while the model
+				is still writing it, and show you the diff as it forms.
+			</p>
+
+			<h3>The self-invocation trick</h3>
+
+			<figure class="code">
+				<figcaption><span>codex-rs/apply-patch/src/lib.rs</span><span class="lines">the standalone contract</span></figcaption>
+				<pre><code class="language-rust">/// Special argv[1] flag used when the Codex executable self-invokes to run the
+/// internal `apply_patch` path.
+///
+/// Although this constant lives in `codex-apply-patch` (to avoid forcing
+/// `codex-arg0` to depend on `codex-core`), it remains part of the "codex core"
+/// process-invocation contract for the standalone `apply_patch` command
+/// surface.
+pub const CODEX_CORE_APPLY_PATCH_ARG1: &amp;str = "--codex-run-as-apply-patch";</code></pre>
+			</figure>
+
+			<p>
+				This is Module&nbsp;1's arg0 trick again. Codex can re-run <em>itself</em> as a
+				patch applier, which means the edit happens in a separate process that can be
+				sandboxed exactly like any other command. The doc comment even explains why the
+				constant lives in this crate — to avoid a dependency cycle. That is the
+				<code>Cargo.toml</code>-shaped thinking from Module&nbsp;1 showing up in a
+				single constant's placement.
+			</p>
+		</section>
+
+		<section class="lesson-section" id="other-tools" data-minutes="8">
+			<h2>Reading, planning, searching</h2>
+
+			<p>
+				Notably absent from the handler list is a <code>read_file</code> tool. Codex
+				generally has the model use the shell — <code>cat</code>, <code>sed</code>,
+				<code>rg</code> — rather than providing a bespoke reader. Fewer tools, less
+				schema in every request, and the model already knows Unix.
+			</p>
+
+			<p>
+				What does get dedicated tools is anything the shell cannot express. Three
+				categories are worth calling out.
+			</p>
+
+			<p>
+				<strong>Tools that talk to you.</strong> <code>request_user_input</code> and
+				<code>request_permissions</code> let the model ask a question mid-turn. These
+				are what produce the <code>ServerRequest</code> messages you saw the
+				<code>codex exec</code> loop handle in Module&nbsp;3 — the agent asking the
+				client, rather than the other way round.
+			</p>
+
+			<p>
+				<strong>Tools for self-management.</strong>
+				<code>get_context_remaining</code> lets the model ask how much room it has
+				left; <code>new_context_window</code> lets it start fresh. Compaction in
+				Module&nbsp;5 is Codex deciding to forget; these are the model deciding.
+			</p>
+
+			<p>
+				<strong>Tools that spawn agents.</strong>
+				<code class="path">codex-rs/core/src/tools/handlers/multi_agents.rs</code> and
+				its <code>_v2</code> successor let a turn delegate to sub-agents. The
+				<code>TurnItem</code> enum in Module&nbsp;4 had matching entries —
+				<code>SubAgentActivity</code>, <code>CollabAgentToolCall</code> — so a
+				sub-agent's work appears in your transcript rather than vanishing.
+			</p>
+
+			<figure class="code">
+				<figcaption><span>codex-rs/core/src/tools/registry.rs</span><span class="lines">what a tool returns</span></figcaption>
+				<pre><code class="language-rust">pub(crate) fn into_response(self) -&gt; ResponseInputItem { /* … */ }
+pub(crate) fn code_mode_result(self) -&gt; serde_json::Value { /* … */ }</code></pre>
+			</figure>
+
+			<p>
+				Two renderings of one result: <code>into_response</code> produces a
+				conversation item to send back to the model; <code>code_mode_result</code>
+				produces JSON for <em>code mode</em>, an alternative where the model writes a
+				script that calls tools rather than emitting one call at a time. Hence the
+				<code class="path">codex-rs/code-mode</code> crates.
+			</p>
+		</section>
+
+		<section class="lesson-section" id="mcp-tools" data-minutes="8">
+			<h2>MCP tools as first-class tools</h2>
+
+			<p>
+				<code class="path">codex-rs/core/src/mcp_tool_call.rs</code> is 77&nbsp;KB, with
+				a 99&nbsp;KB test file beside it. That ratio alone says this is a place where
+				things go wrong.
+			</p>
+
+			<aside class="concept" data-kind="llm">
+				<p class="concept-label">LLM · What MCP is</p>
+				<p>
+					The Model Context Protocol is a standard by which a program exposes tools
+					and resources to an AI agent. You configure an MCP server — a database
+					client, a ticket tracker, a browser — and its tools appear alongside Codex's
+					own. It is a plugin protocol for agents, deliberately vendor-neutral, and
+					Codex both consumes it and provides it (Module&nbsp;10).
+				</p>
+			</aside>
+
+			<p>
+				The design decision worth noticing is that MCP tools are <em>not</em> a special
+				case at the point of use. They arrive through the same registry, are dispatched
+				through the same router, produce <code>McpToolCallBegin</code>/<code>End</code>
+				events shaped like every other operation, and land as
+				<code>TurnItem::McpToolCall</code>. The model cannot tell the difference.
+			</p>
+
+			<p>
+				What makes it hard is everything around that. Servers are external processes
+				that start slowly, crash, change their tool list at runtime, or return
+				enormous results — which is why there is a whole cluster of supporting files:
+			</p>
+
+			<div class="table-wrap">
+				<table>
+					<thead>
+						<tr><th>File</th><th>Problem it solves</th></tr>
+					</thead>
+					<tbody>
+						<tr><td><code>session/mcp_prewarm.rs</code></td><td>Start servers before the first turn needs them</td></tr>
+						<tr><td><code>session/mcp_refresh.rs</code></td><td>Tool lists change while running</td></tr>
+						<tr><td><code>mcp_tool_approval_templates.rs</code></td><td>Explaining an unfamiliar tool to you before you approve it</td></tr>
+						<tr><td><code>mcp_skill_dependencies.rs</code></td><td>A skill requires a particular server</td></tr>
+						<tr><td><code>mcp_tool_exposure.rs</code></td><td>Which of a server's tools to actually advertise</td></tr>
+						<tr><td><code>elicitation.rs</code></td><td>An MCP server asking <em>you</em> a question</td></tr>
+					</tbody>
+				</table>
+			</div>
+
+			<p>
+				<code>AGENTS.md</code> has a rule about this area, and after reading the file
+				sizes you can see why:
+			</p>
+
+			<figure class="code">
+				<figcaption><span>AGENTS.md</span><span class="lines">the MCP rule</span></figcaption>
+				<pre><code class="language-markdown">- When working with MCP tool calls, prefer using
+  `codex-rs/codex-mcp/src/mcp_connection_manager.rs` to handle mutation of
+  tools and tool calls. Aim to minimize the footprint of changes and leverage
+  existing abstractions rather than plumbing code through multiple levels of
+  function calls.</code></pre>
+			</figure>
+		</section>
+
+		<section class="lesson-section" id="tool-anatomy" data-minutes="8">
+			<h2>Anatomy of a tool definition</h2>
+
+			<p>
+				Pull the pieces together. Every tool in Codex is four things, and you have now
+				seen each of them:
+			</p>
+
+			<figure class="diagram">
+				<div class="drow">
+					<div class="dbox"><span class="dbox-title">*_spec.rs</span><span class="dbox-sub">schema + prompt text</span></div>
+				</div>
+				<span class="darrow">↓</span>
+				<div class="drow">
+					<div class="dbox"><span class="dbox-title">*.rs handler</span><span class="dbox-sub">impl CoreToolRuntime</span></div>
+				</div>
+				<span class="darrow">↓</span>
+				<div class="drow">
+					<div class="dbox accent"><span class="dbox-title">ToolRegistry</span><span class="dbox-sub">per-turn assembly</span></div>
+				</div>
+				<span class="darrow">↓</span>
+				<div class="drow">
+					<div class="dbox"><span class="dbox-title">router.rs</span><span class="dbox-sub">dispatch + approvals</span></div>
+				</div>
+				<figcaption class="dcaption">
+					The naming convention is the map: <code>x_spec.rs</code> declares,
+					<code>x.rs</code> executes, <code>x_tests.rs</code> proves.
+				</figcaption>
+			</figure>
+
+			<p>
+				The split between <code>_spec.rs</code> and the handler is not decoration. A
+				spec is pure data — it can be generated, diffed, and snapshot-tested without
+				running anything, which is what
+				<code class="path">codex-rs/core/src/tools/handlers/shell_spec_tests.rs</code>
+				does. Changing what the model is told is then a reviewable diff rather than a
+				behavioural mystery.
+			</p>
+
+			<p>
+				Between the registry and the handler sits the machinery that makes tool calls
+				survivable, each in its own file:
+			</p>
+
+			<div class="table-wrap">
+				<table>
+					<thead>
+						<tr><th>File in <code>tools/</code></th><th>Responsibility</th></tr>
+					</thead>
+					<tbody>
+						<tr><td><code>router.rs</code></td><td>Name → handler, argument parsing</td></tr>
+						<tr><td><code>approvals.rs</code></td><td>Ask the user, remember the answer</td></tr>
+						<tr><td><code>sandboxing.rs</code></td><td>Wrap execution in a cage</td></tr>
+						<tr><td><code>parallel.rs</code></td><td>Run independent calls concurrently</td></tr>
+						<tr><td><code>network_approval.rs</code></td><td>Separate decision for network access</td></tr>
+						<tr><td><code>orchestrator.rs</code></td><td>Sequence a batch within one turn</td></tr>
+						<tr><td><code>lifecycle.rs</code></td><td>Begin/End events, cancellation</td></tr>
+						<tr><td><code>tool_dispatch_trace.rs</code></td><td>Record what was called and why</td></tr>
+					</tbody>
+				</table>
+			</div>
+
+			<aside class="concept" data-kind="eng">
+				<p class="concept-label">Engineering · The distance from a toy agent</p>
+				<p>
+					A tutorial agent's tool call is: parse JSON, call the function, stringify the
+					result. Codex's is: parse, match to a registry entry that may not exist,
+					decide whether it may run at all, ask the user if not, choose a sandbox,
+					decide whether it can run in parallel with its siblings, execute with
+					streaming output and cancellation, truncate to a token budget, emit lifecycle
+					events, record telemetry, and render the result twice for two consumers. Each
+					step is one of those files. This is what "production" means, and it is why
+					the ratio of loop to scaffolding is what it is.
+				</p>
+			</aside>
+
+			<h3>What you now know</h3>
+
+			<p>
+				Tools implement <code>CoreToolRuntime</code>, whose default methods mark what
+				varies; the registry is assembled per turn and holds
+				<code>Arc&lt;dyn …&gt;</code> handlers. Tool schemas are built in code so their
+				descriptions — which are prompt, not documentation — can differ per platform.
+				The shell tool yields a session id rather than blocking, which is how background
+				processes exist. <code>apply_patch</code> is a context-addressed diff dialect
+				with a 17-line grammar, a streaming parser, and a self-invoking standalone mode.
+				MCP tools are deliberately indistinguishable from built-ins at the point of use,
+				and pay for it in supporting machinery.
+			</p>
+
+			<p>
+				Every one of those tool calls has been quietly deferring one question: is it
+				safe to run this? That is the next module.
+			</p>
+		</section>
+	</article>
+	<script src="manifest.js"></script>
+	<script src="assets/vendor/highlight.min.js"></script>
+	<script src="assets/js/app.js" defer></script>
+</body>
+</html>

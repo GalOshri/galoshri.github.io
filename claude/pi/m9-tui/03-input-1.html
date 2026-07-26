@@ -1,0 +1,134 @@
+<!doctype html>
+<html lang="en">
+<head>
+	<meta charset="utf-8">
+	<meta name="viewport" content="width=device-width, initial-scale=1">
+	<title>Keyboard input, part 1: raw mode · pi · Codebase Academy</title>
+	<link rel="stylesheet" href="../assets/css/site.css">
+</head>
+<body>
+	<article class="lesson">
+		<h1>Keyboard input, part 1: raw mode</h1>
+		<p class="lede">
+			Output was half the story. Input is the murkier half: keystrokes reach
+			a program as an undifferentiated stream of bytes, batched
+			unpredictably, with paste and typing indistinguishable — unless you
+			negotiate. This lesson covers the plumbing from raw bytes to clean
+			per-key events.
+		</p>
+
+		<h2>Entering raw mode (with an exit plan)</h2>
+		<figure class="code">
+			<figcaption><span>packages/tui/src/terminal.ts</span><span class="lines">ProcessTerminal.start, abridged</span></figcaption>
+			<pre><code class="language-typescript">start(onInput: (data: string) =&gt; void, onResize: () =&gt; void): void {
+	// Save previous state and enable raw mode
+	this.wasRaw = process.stdin.isRaw || false;
+	if (process.stdin.setRawMode) {
+		process.stdin.setRawMode(true);
+	}
+	process.stdin.setEncoding("utf8");
+	process.stdin.resume();
+
+	// Enable bracketed paste mode - terminal will wrap pastes in \x1b[200~ ... \x1b[201~
+	process.stdout.write("\x1b[?2004h");
+
+	process.stdout.on("resize", this.resizeHandler);
+
+	// On Windows, enable ENABLE_VIRTUAL_TERMINAL_INPUT so the console sends
+	// VT escape sequences ... Must run AFTER setRawMode(true).
+	this.enableWindowsVTInput();
+
+	// Query Kitty keyboard protocol and fall back to modifyOtherKeys when DA confirms no Kitty response.
+	this.queryAndEnableKittyProtocol();
+}</code></pre>
+		</figure>
+		<p>
+			The moves, in order: remember the old state (a TUI that crashes
+			without restoring cooked mode leaves the user's shell unusable — the
+			classic "my terminal is broken" bug); flip to raw so every keypress
+			arrives immediately, unbuffered, unechoed; then <em>negotiate
+			upgrades</em> with the terminal — bracketed paste, Windows VT input,
+			and the Kitty protocol (next lesson). Note that negotiation is
+			literally writing escape codes to stdout and listening for the
+			terminal's escape-code <em>replies</em> on stdin: the terminal is a
+			peer you talk to, not a device you configure.
+		</p>
+
+		<h2>The batching problem, and StdinBuffer</h2>
+		<p>
+			Raw mode's catch: bytes arrive in arbitrary chunks. Type fast and one
+			<code>data</code> event carries <code>"abc"</code>; an arrow key is
+			the three bytes <code>\x1b[A</code> which may arrive <em>split
+			across</em> two events; and a paste is one giant blob you must not
+			interpret as typed commands (imagine pasting text containing
+			<code>q</code> into something that quits on q…).
+		</p>
+		<p>
+			<code>StdinBuffer</code> (434 lines) is the fix — a small state
+			machine that reassembles and splits the stream into <em>one event per
+			logical sequence</em>: single keys, complete escape sequences, and
+			paste blocks (delimited by the bracketed-paste markers we enabled
+			above) emitted whole as a separate <code>paste</code> event. The
+			10ms timeout handles the genuinely ambiguous case: a lone
+			<code>\x1b</code> might be the Escape key <em>or</em> the start of a
+			longer sequence still in flight — wait a beat, then decide.
+			Reassembly-with-timeout is the same shape as the SSE line-buffering
+			you read in lesson 4.2; byte streams always need this dance.
+		</p>
+
+		<aside class="concept" data-kind="node">
+			<p class="concept-label">Node.js · EventEmitter</p>
+			<p>
+				<code>StdinBuffer extends EventEmitter</code> — Node's built-in
+				pub/sub base class and the ancestral pattern of the platform.
+				Mechanically it's a dict of listener lists:
+				<code>emitter.on("data", fn)</code> appends,
+				<code>emitter.emit("data", seq)</code> calls each listener
+				synchronously. Python's closest kin are signal libraries (blinker)
+				or hand-rolled callback lists; Node bakes it into the core
+				(streams, sockets, and processes all <em>are</em> EventEmitters —
+				you used one in lesson 6.5: <code>child.stdout.on("data")</code>).
+			</p>
+			<p>
+				Modern typed twist: <code>EventEmitter&lt;StdinBufferEventMap&gt;</code>
+				— a generic event map so <code>on("data", ...)</code> and
+				<code>on("paste", ...)</code> have typed payloads and a typo'd
+				event name fails the build. Compare this to pi's <em>other</em>
+				pub/sub, the Agent's awaited listeners (5.4): EventEmitter is
+				synchronous fire-and-forget, fine for keystrokes; the Agent
+				needed ordering and settlement guarantees, so it rolled its own.
+				Choosing between those two is a recurring design decision, and now
+				you've seen both sides of it in one codebase.
+			</p>
+		</aside>
+
+		<h2>The routing chain</h2>
+		<p>
+			From <code>TUI.handleInput</code>, each clean sequence runs a
+			gauntlet: terminal-protocol responses are consumed first (color
+			queries, protocol negotiation — invisible housekeeping), then global
+			input listeners get a veto (extensions can consume or rewrite input —
+			lesson 8.1's <code>input</code> event), then the overlay stack (an
+			open dialog captures keys before the world below), and finally the
+			<strong>focused component's</strong> <code>handleInput(data)</code> —
+			usually the editor. After any input, <code>requestRender()</code>.
+			Notice there's no global keymap dispatching to actions; components
+			interpret their own bytes, with a shared <code>matchesKey</code>
+			helper for decoding. Which raises the question of how you match
+			"ctrl+shift+p" against bytes at all — next lesson.
+		</p>
+
+		<h2>What you now know</h2>
+		<p>
+			Input = raw mode with a restore plan, negotiated terminal upgrades,
+			a reassembly state machine turning byte soup into per-sequence
+			events, and a priority chain from protocol housekeeping down to the
+			focused component. The remaining mystery is the bytes themselves —
+			why <kbd>ctrl+shift+p</kbd> needs a protocol upgrade to even exist.
+		</p>
+	</article>
+	<script src="../manifest.js"></script>
+	<script src="../assets/vendor/highlight.min.js"></script>
+	<script src="../assets/js/app.js" defer></script>
+</body>
+</html>

@@ -1,0 +1,149 @@
+<!doctype html>
+<html lang="en">
+<head>
+	<meta charset="utf-8">
+	<meta name="viewport" content="width=device-width, initial-scale=1">
+	<title>Streaming to your terminal · pi · Codebase Academy</title>
+	<link rel="stylesheet" href="../assets/css/site.css">
+</head>
+<body>
+	<article class="lesson">
+		<h1>Streaming to your terminal</h1>
+		<p class="lede">
+			While the loop turned, your screen was alive: a spinner, then words
+			appearing mid-sentence, a nicely boxed tool call, syntax-highlighted file
+			contents. Time to meet the layer that painted all that — <code>pi-tui</code> —
+			at flyover altitude.
+		</p>
+
+		<h2>A UI framework where everything is lines of text</h2>
+		<p>
+			Browsers give you HTML and CSS; a terminal gives you a grid of character
+			cells and some escape codes. pi-tui builds a component system on top of
+			that grid, and its central interface is startlingly small:
+		</p>
+
+		<figure class="code">
+			<figcaption><span>packages/tui/src/tui.ts</span><span class="lines">the Component interface, verbatim (comments trimmed)</span></figcaption>
+			<pre><code class="language-typescript">export interface Component {
+	/** Render the component to lines for the given viewport width */
+	render(width: number): string[];
+
+	/** Optional handler for keyboard input when component has focus */
+	handleInput?(data: string): void;
+
+	/** If true, component receives key release events (Kitty protocol). */
+	wantsKeyRelease?: boolean;
+
+	/** Invalidate any cached rendering state. */
+	invalidate(): void;
+}</code></pre>
+		</figure>
+
+		<p>
+			That's the whole contract: <em>given a width, return an array of strings —
+			one per terminal line</em>. A chat message is a component. The spinner is
+			a component. The editor you typed into is a component. The screen is a
+			list of components, and rendering is: ask each for its lines, concatenate
+			the arrays. If you've used React, squint: <code>render()</code> returning
+			lines instead of virtual DOM, <code>invalidate()</code> instead of
+			re-render triggers. Same philosophy, one-thousandth the machinery.
+		</p>
+
+		<h2>From agent event to changed lines</h2>
+		<p>
+			The interactive mode subscribed to the Agent's broadcast back in lesson
+			2.2. Its listener maps events to component updates — conceptually:
+		</p>
+		<ul>
+			<li><code>message_start</code> (assistant) → create a message component, append to the chat list</li>
+			<li><code>message_update</code> → hand the component the new partial text; it re-renders its Markdown</li>
+			<li><code>tool_execution_start</code> → add a tool-call component with a spinner</li>
+			<li><code>tool_execution_end</code> → swap the spinner for the result (diff view, file listing…)</li>
+		</ul>
+		<p>
+			Each update marks the tree dirty and requests a render. Fifty
+			<code>message_update</code>s a second would mean fifty full repaints — so
+			requests are <em>coalesced</em> and capped at roughly sixty frames a
+			second, like a game loop.
+		</p>
+
+		<h2>The differential renderer</h2>
+		<p>
+			Here's the part that makes pi feel instant. Repainting a terminal from
+			scratch — clear everything, reprint every line — flickers and, over SSH,
+			crawls. So the renderer keeps a copy of <strong>what it drew last time</strong>
+			(<code>previousLines</code>) and compares:
+		</p>
+
+		<figure class="svg-diagram">
+			<svg viewBox="0 0 560 190" width="560" role="img" aria-label="Differential rendering: previous frame and new frame compared line by line; only the changed window is repainted">
+				<g fill="none" stroke="currentColor" stroke-opacity="0.45" stroke-width="1.2">
+					<rect x="30" y="30" width="200" height="130" rx="6"/>
+					<rect x="330" y="30" width="200" height="130" rx="6"/>
+				</g>
+				<g fill="currentColor" font-size="11" opacity="0.55">
+					<text x="130" y="20" text-anchor="middle">previous frame</text>
+					<text x="430" y="20" text-anchor="middle">new frame</text>
+				</g>
+				<g fill="currentColor" font-size="11" font-family="monospace">
+					<text x="40" y="50">│ user: what does pack…</text>
+					<text x="40" y="68">│ read package.json ✓</text>
+					<text x="40" y="86">│ This file defines yo</text>
+					<text x="40" y="104">│ ur project's metadat</text>
+					<text x="40" y="122" opacity="0.4">│</text>
+					<text x="40" y="140">└ [editor]</text>
+					<text x="340" y="50">│ user: what does pack…</text>
+					<text x="340" y="68">│ read package.json ✓</text>
+					<text x="340" y="86">│ This file defines yo</text>
+					<text x="340" y="104" font-weight="bold">│ ur project's metadata,</text>
+					<text x="340" y="122" font-weight="bold">│ dependencies, and the</text>
+					<text x="340" y="140">└ [editor]</text>
+				</g>
+				<g stroke="currentColor" fill="none" stroke-width="1.5" stroke-opacity="0.9">
+					<rect x="334" y="93" width="192" height="38" rx="4" stroke-dasharray="4 3"/>
+				</g>
+				<g fill="currentColor" font-size="11" opacity="0.7">
+					<text x="430" y="175" text-anchor="middle">only these lines are rewritten</text>
+				</g>
+			</svg>
+			<figcaption>Line-by-line diff of the two frames finds the first and last changed lines; the cursor jumps there and rewrites only that window.</figcaption>
+		</figure>
+
+		<p>
+			The renderer finds the first changed line and the last changed line, moves
+			the terminal cursor up to the first, and rewrites just that window —
+			wrapping the whole update in a "synchronized output" escape sequence so
+			the terminal applies it atomically, without flicker. When the model is
+			streaming prose, usually only a line or two at the bottom changes per
+			frame, so each repaint writes a few dozen bytes. That's the entire secret
+			of the smoothness. (Certain events — the terminal getting resized, content
+			shrinking — force an honest full redraw; Module 9 walks the real
+			<code>doRender</code> with all its edge cases.)
+		</p>
+
+		<div class="callout note">
+			<span class="callout-label">Note · why this layer exists at all</span>
+			<p>
+				You might wonder why pi doesn't use an existing terminal-UI library.
+				Partly craft, partly control: streaming Markdown that reflows as it
+				grows, inline images, custom keyboard protocols, and remote-friendly
+				repaint sizes are all easier when you own the renderer. It's the same
+				make-vs-buy judgment you saw with dependencies in lesson 1.5 — pi
+				consistently chooses "make."
+			</p>
+		</div>
+
+		<h2>What you now know</h2>
+		<p>
+			Components render to arrays of strings; agent events mutate components;
+			a throttled differential renderer repaints only the lines that changed.
+			Your answer is on screen. One stop left in the trace: the file on disk
+			that means this conversation isn't lost when you close the terminal.
+		</p>
+	</article>
+	<script src="../manifest.js"></script>
+	<script src="../assets/vendor/highlight.min.js"></script>
+	<script src="../assets/js/app.js" defer></script>
+</body>
+</html>

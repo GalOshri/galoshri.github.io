@@ -1,0 +1,146 @@
+<!doctype html>
+<html lang="en">
+<head>
+	<meta charset="utf-8">
+	<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+	<meta name="color-scheme" content="light dark">
+	<title>Codebase Academy</title>
+	<meta name="description" content="Deep, self-contained courses on real codebases — the engineering concepts, the architecture, and the code itself.">
+	<style>
+		/* Self-contained on purpose: this page is the hub for both courses and
+		   should not break when either course's stylesheet changes. Tokens mirror
+		   assets/css/site.css in each course. */
+		:root {
+			color-scheme: light dark;
+			--bg: #faf9f7;
+			--surface: #ffffff;
+			--text: #23272e;
+			--text-muted: #6b7079;
+			--text-faint: #9aa0a8;
+			--border: #e5e1d8;
+			--accent: #4a55c4;
+			--radius-lg: 12px;
+			--measure: 68ch;
+			--font-sans: -apple-system, BlinkMacSystemFont, "Segoe UI", system-ui, sans-serif;
+			--font-mono: ui-monospace, "SF Mono", "Cascadia Code", Menlo, Consolas, monospace;
+			--shadow-card: 0 1px 2px rgba(35, 39, 46, 0.05), 0 4px 14px rgba(35, 39, 46, 0.05);
+		}
+		@media (prefers-color-scheme: dark) {
+			:root {
+				--bg: #15171c;
+				--surface: #1c1f26;
+				--text: #dfe2e7;
+				--text-muted: #9aa1ab;
+				--text-faint: #6d7480;
+				--border: #2b303a;
+				--accent: #8d96f2;
+				--shadow-card: 0 1px 2px rgba(0, 0, 0, 0.4), 0 4px 14px rgba(0, 0, 0, 0.3);
+			}
+		}
+		*, *::before, *::after { box-sizing: border-box; }
+		html { -webkit-text-size-adjust: 100%; }
+		body {
+			margin: 0;
+			min-height: 100dvh;
+			background: var(--bg);
+			color: var(--text);
+			font-family: var(--font-sans);
+			font-size: 17px;
+			line-height: 1.65;
+			-webkit-font-smoothing: antialiased;
+			padding: 2rem clamp(1rem, 5vw, 4.5rem) 4rem;
+			padding-left: max(clamp(1rem, 5vw, 4.5rem), env(safe-area-inset-left));
+			padding-right: max(clamp(1rem, 5vw, 4.5rem), env(safe-area-inset-right));
+			padding-bottom: max(4rem, env(safe-area-inset-bottom));
+		}
+		.wrap { max-width: var(--measure); margin: 0 auto; }
+		.crumbs { font-size: 0.82rem; color: var(--text-faint); margin: 0 0 1.5rem; }
+		.crumbs a { color: var(--text-muted); text-decoration: none; }
+		.crumbs a:hover { color: var(--accent); }
+		h1 {
+			font-size: clamp(2rem, 8vw, 2.5rem);
+			letter-spacing: -0.025em;
+			line-height: 1.15;
+			margin: 0 0 1rem;
+		}
+		.lede { font-size: 1.15rem; color: var(--text-muted); margin: 0 0 0.75rem; }
+		.small { font-size: 0.88rem; color: var(--text-faint); margin: 0 0 2.5rem; }
+		.cards { display: grid; gap: 1.2rem; }
+		.card {
+			display: block;
+			text-decoration: none;
+			color: var(--text);
+			background: var(--surface);
+			border: 1px solid var(--border);
+			border-radius: var(--radius-lg);
+			padding: 1.5rem 1.7rem;
+			box-shadow: var(--shadow-card);
+			transition: border-color 0.12s ease, transform 0.12s ease;
+		}
+		.card:hover { border-color: var(--accent); transform: translateY(-1px); }
+		.card h2 {
+			margin: 0 0 0.4rem;
+			font-size: 1.35rem;
+			letter-spacing: -0.015em;
+			line-height: 1.3;
+			color: var(--accent);
+		}
+		.card p { margin: 0 0 0.8rem; color: var(--text-muted); font-size: 0.97rem; }
+		.card .meta { font-size: 0.8rem; color: var(--text-faint); font-family: var(--font-mono); }
+		footer {
+			margin-top: 3.5rem;
+			padding-top: 1.5rem;
+			border-top: 1px solid var(--border);
+			font-size: 0.8rem;
+			color: var(--text-faint);
+		}
+		footer a { color: var(--text-muted); }
+	</style>
+</head>
+<body>
+	<div class="wrap">
+		<p class="crumbs"><a href="../index.html">galoshri.com</a></p>
+
+		<h1>Codebase Academy</h1>
+		<p class="lede">
+			Deep, self-contained courses on real codebases — the engineering concepts, the
+			architecture, and the code itself, explained progressively in short lessons.
+		</p>
+		<p class="small">
+			Everything you need is on the page: real code excerpts, diagrams, and
+			just-in-time explanations written for someone with basic Python. Both courses
+			work offline and read well on a phone.
+		</p>
+
+		<div class="cards">
+			<a class="card" href="pi/index.html">
+				<h2>pi: Anatomy of an AI Coding Agent</h2>
+				<p>
+					How an AI coding agent actually works, taught through a real, production
+					codebase: a unified API over 1,000+ LLMs, the agent loop, tools that edit
+					files and run shells, session trees, a plugin system, and a terminal UI
+					framework — all built from scratch.
+				</p>
+				<span class="meta">10 modules · 58 lessons · TypeScript, explained from Python</span>
+			</a>
+
+			<a class="card" href="codex/index.html">
+				<h2>Codex: Anatomy of OpenAI's Coding Agent</h2>
+				<p>
+					A dissection of OpenAI's Codex CLI: roughly a hundred Rust crates, from the
+					syscalls that cage an untrusted shell command up to the loop that gives a
+					model agency. Covers the protocol, the agent core, tools, three
+					platform sandboxes, the terminal UI, and how it all persists.
+				</p>
+				<span class="meta">12 modules · 66 sections · Rust, explained from Python</span>
+			</a>
+		</div>
+
+		<footer>
+			Courses by <a href="../index.html">Gal Oshri</a> · code excerpts © their authors
+			(<span title="pi">MIT</span>, <span title="codex">Apache-2.0</span>) · both
+			courses run entirely offline
+		</footer>
+	</div>
+</body>
+</html>

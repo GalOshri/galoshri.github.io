@@ -1,0 +1,197 @@
+<!doctype html>
+<html lang="en">
+<head>
+	<meta charset="utf-8">
+	<meta name="viewport" content="width=device-width, initial-scale=1">
+	<title>What is pi? · pi · Codebase Academy</title>
+	<link rel="stylesheet" href="../assets/css/site.css">
+</head>
+<body>
+	<article class="lesson">
+		<h1>What is pi?</h1>
+		<p class="lede">
+			pi is a program you run in a terminal. You type a request in plain English —
+			"fix the failing test", "explain this function" — and a large language model
+			reads your code, edits your files, and runs commands until the job is done.
+			This course takes that magic trick apart, piece by piece, until you could
+			build one yourself.
+		</p>
+
+		<h2>The trick, in one paragraph</h2>
+		<p>
+			A language model on its own can only do one thing: given text, produce more
+			text. It cannot open files, run programs, or see your project. An
+			<strong>agent</strong> is the small amount of ordinary software wrapped
+			around a model that fixes this: it sends the model your request, and when
+			the model answers "I'd like to read <code>package.json</code>" instead of
+			answering in prose, the wrapper actually reads the file and sends the
+			contents back. The model looks at the result, asks for the next thing —
+			edit this file, run that test — and the wrapper obliges, around and around,
+			until the model finally answers in prose. That wrapper-plus-loop is the
+			whole idea. Everything else is engineering.
+		</p>
+
+		<aside class="concept" data-kind="llm">
+			<p class="concept-label">LLM · What "an agent" means</p>
+			<p>
+				The word gets used loosely, but in this codebase (and this course) it means
+				something precise: <strong>a loop that alternates between a language model
+				and a set of tools</strong>. The model proposes tool calls; the program
+				executes them and feeds results back; the loop ends when the model stops
+				asking for tools. There is no hidden intelligence in the wrapper — it's a
+				<code>while</code> loop you could sketch in twenty lines of Python. The
+				model supplies the judgment; the loop supplies hands.
+			</p>
+		</aside>
+
+		<figure class="svg-diagram">
+			<svg viewBox="0 0 560 210" width="560" role="img" aria-label="The agent loop: user prompt goes to the model; the model either answers or requests a tool call; tool results loop back to the model">
+				<defs>
+					<marker id="arr1" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+						<path d="M0,0 L10,5 L0,10 z" fill="currentColor" opacity="0.55"/>
+					</marker>
+				</defs>
+				<g fill="none" stroke="currentColor" stroke-opacity="0.5" stroke-width="1.5">
+					<rect x="15" y="75" width="110" height="52" rx="9"/>
+					<rect x="225" y="75" width="110" height="52" rx="9"/>
+					<rect x="435" y="20" width="110" height="52" rx="9"/>
+					<rect x="435" y="135" width="110" height="52" rx="9"/>
+					<line x1="125" y1="101" x2="222" y2="101" marker-end="url(#arr1)"/>
+					<path d="M 335 88 L 385 60 L 432 48" marker-end="url(#arr1)"/>
+					<path d="M 335 114 L 385 145 L 432 158" marker-end="url(#arr1)"/>
+					<path d="M 435 175 C 330 215 250 190 275 130" marker-end="url(#arr1)"/>
+				</g>
+				<g fill="currentColor" font-size="13" text-anchor="middle">
+					<text x="70" y="97">you</text>
+					<text x="70" y="114" opacity="0.6" font-size="11">"fix the test"</text>
+					<text x="280" y="97">the model</text>
+					<text x="280" y="114" opacity="0.6" font-size="11">text in, text out</text>
+					<text x="490" y="42">answer</text>
+					<text x="490" y="59" opacity="0.6" font-size="11">done — show it</text>
+					<text x="490" y="157">tool call</text>
+					<text x="490" y="174" opacity="0.6" font-size="11">read / edit / bash</text>
+					<text x="345" y="200" opacity="0.6" font-size="11">tool result goes back in</text>
+				</g>
+			</svg>
+			<figcaption>The agent loop. The bottom arrow — feeding tool results back to the model — is what turns a text predictor into something that can act.</figcaption>
+		</figure>
+
+		<h2>And here is that loop, for real</h2>
+		<p>
+			This isn't a metaphor. Deep inside pi's source there is a function called
+			<code>runLoop</code>, and its core reads almost exactly like the diagram.
+			Don't worry about the syntax yet — by Module 5 you'll read this fluently.
+			Just notice the shape: <em>stream a response from the model, collect its
+			tool calls, execute them, push the results back into the conversation,
+			repeat</em>.
+		</p>
+
+		<figure class="code">
+			<figcaption><span>packages/agent/src/agent-loop.ts</span><span class="lines">inside runLoop, condensed</span></figcaption>
+			<pre><code class="language-typescript">// Inner loop: process tool calls and steering messages
+while (hasMoreToolCalls || pendingMessages.length > 0) {
+	// Stream assistant response
+	const message = await streamAssistantResponse(currentContext, config, signal, emit, streamFn);
+
+	// Check for tool calls
+	const toolCalls = message.content.filter((c) => c.type === "toolCall");
+
+	hasMoreToolCalls = false;
+	if (toolCalls.length > 0) {
+		const executedToolBatch = await executeToolCalls(currentContext, message, config, signal, emit);
+		hasMoreToolCalls = !executedToolBatch.terminate;
+
+		for (const result of executedToolBatch.messages) {
+			currentContext.messages.push(result);  // feed results back in
+		}
+	}
+}</code></pre>
+		</figure>
+
+		<p>
+			Ask the model something; if it responds with tool calls, run them and loop
+			again; if it responds with plain text, the loop ends and you see the answer.
+			Twenty lines of honest code. The rest of this codebase — all ~110,000 lines
+			of it — exists to make those twenty lines <em>work well</em>: to talk to any
+			model provider, to edit files safely, to draw a fast terminal UI, to
+			remember conversations, to let users extend it.
+		</p>
+
+		<h2>What pi is, concretely</h2>
+		<p>
+			pi (the project calls itself the <strong>Pi agent harness</strong>) is an
+			open-source coding agent built by Mario Zechner and Vegard Stikbakke,
+			published as npm packages under <code>@earendil-works</code>. Three things
+			make it an unusually good codebase to learn from:
+		</p>
+		<ul>
+			<li>
+				<strong>It's real.</strong> This is not a toy tutorial repo. It ships to
+				actual users, supports over a thousand models across ~35 providers, and
+				handles the ugly parts — flaky networks, models that emit broken JSON,
+				terminals with incompatible keyboard protocols.
+			</li>
+			<li>
+				<strong>It's small enough to actually finish.</strong> The core ideas
+				live in a few thousand lines. Compare that with agents embedded in
+				million-line products; here you can genuinely reach the bottom.
+			</li>
+			<li>
+				<strong>It's cleanly layered.</strong> The code that draws the terminal
+				knows nothing about AI. The code that calls models knows nothing about
+				agents. The agent loop knows nothing about coding. Each layer is a
+				separate package you can study in isolation — and that's exactly how
+				this course is organized.
+			</li>
+		</ul>
+
+		<h2>The five packages</h2>
+		<p>You'll get a proper tour next lesson, but here's the cast of characters:</p>
+		<figure class="diagram">
+			<div class="drow">
+				<div class="dbox"><span class="dbox-title">pi-tui</span><span class="dbox-sub">draws the terminal UI</span></div>
+				<div class="dbox"><span class="dbox-title">pi-ai</span><span class="dbox-sub">one API for 1,000+ models</span></div>
+			</div>
+			<span class="darrow">↓ used by</span>
+			<div class="drow">
+				<div class="dbox accent"><span class="dbox-title">pi-agent-core</span><span class="dbox-sub">the agent loop</span></div>
+			</div>
+			<span class="darrow">↓ used by</span>
+			<div class="drow">
+				<div class="dbox"><span class="dbox-title">pi-coding-agent</span><span class="dbox-sub">the actual `pi` program</span></div>
+				<div class="dbox faded"><span class="dbox-title">pi-orchestrator</span><span class="dbox-sub">runs fleets of pis (experimental)</span></div>
+			</div>
+			<figcaption class="dcaption">One repository, five npm packages, strict one-way dependencies.</figcaption>
+		</figure>
+
+		<h2>Where this course goes</h2>
+		<p>
+			Module 2 follows a single message — yours — through the entire system, from
+			keypress to pixels, without stopping to smell every flower. That gives you a
+			map. Then we descend layer by layer: the LLM interface (Modules 3–4), the
+			agent loop itself (Module 5), the coding agent product with its tools,
+			sessions, and memory (Modules 6–7), the plugin system (Module 8), and
+			finally the terminal UI machinery (Module 9). Every TypeScript, Node.js,
+			and LLM concept you need appears in a color-coded box like the purple one
+			above, exactly when the code first demands it — always with a Python
+			comparison, since that's where you're coming from.
+		</p>
+
+		<div class="callout deeper">
+			<span class="callout-label">Optional · try it before you dissect it</span>
+			<p>
+				The course never requires running pi, but using it once makes everything
+				more vivid. If you have Node installed:
+				<code>npm install -g --ignore-scripts @earendil-works/pi-coding-agent</code>,
+				then <code>cd</code> into any project, run <code>pi</code>, and
+				authenticate with <code>/login</code> (or set <code>ANTHROPIC_API_KEY</code>).
+				A copy of the source also lives at <code class="path">~/Projects/pi</code>
+				if you ever feel like wandering.
+			</p>
+		</div>
+	</article>
+	<script src="../manifest.js"></script>
+	<script src="../assets/vendor/highlight.min.js"></script>
+	<script src="../assets/js/app.js" defer></script>
+</body>
+</html>

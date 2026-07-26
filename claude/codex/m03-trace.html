@@ -1,0 +1,701 @@
+<!doctype html>
+<html lang="en">
+<head>
+	<meta charset="utf-8">
+	<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+	<meta name="color-scheme" content="light dark">
+	<title>One Message Through the System · Codex Explainer</title>
+	<link rel="stylesheet" href="assets/css/site.css">
+</head>
+<body>
+	<article class="lesson" data-module="m03-trace.html">
+		<h1>One Message Through the System</h1>
+		<p class="lede">
+			You type <em>"what does safety.rs do?"</em> and press Enter. Codex reads the
+			file, runs a command, and answers. This module follows that one message through
+			every layer it touches. Nothing here is covered exhaustively — each section
+			names the module that opens the box properly. Think of this as the map you will
+			keep returning to.
+		</p>
+
+		<section class="lesson-section" id="press-enter" data-minutes="8">
+			<h2>You press Enter</h2>
+
+			<p>
+				The journey has more layers than you would guess, so here is the whole route
+				before we walk it:
+			</p>
+
+			<figure class="diagram">
+				<div class="drow">
+					<div class="dbox"><span class="dbox-title">tui</span><span class="dbox-sub">your keystrokes</span></div>
+				</div>
+				<span class="darrow">↓ <span class="dlabel">ClientRequest::TurnCreate</span></span>
+				<div class="drow">
+					<div class="dbox"><span class="dbox-title">app-server</span><span class="dbox-sub">in-process</span></div>
+				</div>
+				<span class="darrow">↓ <span class="dlabel">Op::UserInput</span></span>
+				<div class="drow">
+					<div class="dbox"><span class="dbox-title">CodexThread</span><span class="dbox-sub">submission queue</span></div>
+				</div>
+				<span class="darrow">↓</span>
+				<div class="drow">
+					<div class="dbox accent"><span class="dbox-title">RegularTask → run_turn</span><span class="dbox-sub">the agent loop</span></div>
+				</div>
+				<span class="darrow">↓</span>
+				<div class="drow keep-row">
+					<div class="dbox"><span class="dbox-title">model</span><span class="dbox-sub">Responses API</span></div>
+					<div class="dbox"><span class="dbox-title">tools</span><span class="dbox-sub">shell, patch</span></div>
+				</div>
+				<span class="darrow">↑ <span class="dlabel">Event / ServerNotification</span></span>
+				<div class="drow">
+					<div class="dbox"><span class="dbox-title">back to your screen</span><span class="dbox-sub">and to a rollout file</span></div>
+				</div>
+				<figcaption class="dcaption">
+					Two protocol boundaries, one loop, and everything streams back up.
+				</figcaption>
+			</figure>
+
+			<p>
+				The single most important structural fact — the one that explains the shape of
+				the whole system — is that <strong>this is not a function call</strong>. Your
+				message does not travel down a call stack and return with an answer. It is
+				<em>submitted to a queue</em>, and results arrive later as a stream of events
+				on a different queue.
+			</p>
+
+			<figure class="code">
+				<figcaption><span>codex-rs/protocol/src/protocol.rs</span><span class="lines">module doc comment</span></figcaption>
+				<pre><code class="language-rust">//! Defines the protocol for a Codex session between a client and an agent.
+//!
+//! Uses a SQ (Submission Queue) / EQ (Event Queue) pattern to asynchronously
+//! communicate between user and agent.</code></pre>
+			</figure>
+
+			<aside class="concept" data-kind="eng">
+				<p class="concept-label">Engineering · Why queues instead of calls?</p>
+				<p>
+					Because a turn can take four minutes, and during those four minutes you
+					must still be able to see progress, interrupt, or type a follow-up. A
+					function call gives you one return value at the end and nothing in between.
+					Two queues give you a running commentary and a channel to talk back. The
+					price is that control flow stops being obvious — you can't just read down
+					the page — which is exactly why this module exists.
+				</p>
+			</aside>
+
+			<p>
+				The two ends of that pattern are a matched pair of tiny structs. Notice that
+				both carry an <code>id</code>, and that the event's <code>id</code> is
+				explicitly documented as pointing back at a submission:
+			</p>
+
+			<figure class="code">
+				<figcaption><span>codex-rs/protocol/src/protocol.rs</span><span class="lines">Submission and Event</span></figcaption>
+				<pre><code class="language-rust">/// Submission Queue Entry - requests from user
+#[derive(Debug, Clone)]
+pub struct Submission {
+    /// Unique id for this Submission to correlate with Events
+    pub id: String,
+    /// Payload
+    pub op: Op,
+    /// Client-provided id for the user message represented by `Op::UserInput`.
+    pub client_user_message_id: Option&lt;String&gt;,
+    /// Optional W3C trace carrier propagated across async submission handoffs.
+    pub trace: Option&lt;W3cTraceContext&gt;,
+}
+
+/// Event Queue Entry - events from agent
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct Event {
+    /// Submission `id` that this event is correlated with.
+    pub id: String,
+    /// Payload
+    pub msg: EventMsg,
+}</code></pre>
+			</figure>
+
+			<p>
+				That correlation id is what lets a client with several turns in flight sort
+				the resulting torrent of events back into conversations. Module&nbsp;4 takes
+				<code>Op</code> and <code>EventMsg</code> apart properly.
+			</p>
+		</section>
+
+		<section class="lesson-section" id="argv-to-config" data-minutes="8">
+			<h2>From argv to a Config</h2>
+
+			<p>
+				Before any of that, the process has to start. Module&nbsp;1 showed
+				<code>main</code> handing straight to <code>arg0_dispatch_or_else</code>, which
+				builds a Tokio runtime and calls <code>cli_main</code>. That function's first
+				act is to destructure the parsed command line:
+			</p>
+
+			<figure class="code">
+				<figcaption><span>codex-rs/cli/src/main.rs</span><span class="lines">cli_main, opening</span></figcaption>
+				<pre><code class="language-rust">async fn cli_main(
+    arg0_paths: Arg0DispatchPaths,
+    remote_control_disabled: bool,
+) -&gt; anyhow::Result&lt;()&gt; {
+    let MultitoolCli {
+        config_overrides: mut root_config_overrides,
+        feature_toggles,
+        remote,
+        mut interactive,
+        subcommand,
+    } = MultitoolCli::parse();
+
+    // Fold --enable/--disable into config overrides so they flow to all subcommands.
+    let toggle_overrides = feature_toggles.to_overrides()?;
+    root_config_overrides.raw_overrides.extend(toggle_overrides);</code></pre>
+			</figure>
+
+			<aside class="concept" data-kind="rust">
+				<p class="concept-label">Rust · Destructuring in a <code>let</code></p>
+				<p>
+					<code>let MultitoolCli { a, b, .. } = value;</code> pulls fields out of a
+					struct into local variables in one statement — Python's tuple unpacking,
+					generalised to named fields. <code>mut</code> on individual bindings marks
+					just those as mutable. It reads oddly at first, but it is everywhere in
+					this codebase, and it is how a function announces exactly which parts of a
+					big struct it intends to touch.
+				</p>
+			</aside>
+
+			<p>
+				Because you ran <code>codex</code> with no subcommand, <code>subcommand</code>
+				is <code>None</code> and the <code>interactive</code> field — a
+				<code>TuiCli</code> — carries your prompt. Those raw arguments then become a
+				<code>Config</code>, which is the single object describing everything about
+				this run: which model, which approval policy, which sandbox, which working
+				directory, which MCP servers.
+			</p>
+
+			<p>
+				Config is assembled from layers — built-in defaults, then
+				<code>~/.codex/config.toml</code>, then a named profile, then
+				<code>-c key=value</code> overrides from the command line, then feature
+				toggles. That layering is intricate enough to be its own subject;
+				Module&nbsp;11 covers it. For now, the only thing you need is that by the time
+				anything interesting happens, there is one <code>Config</code>, and it is
+				immutable.
+			</p>
+
+			<div class="callout note">
+				<span class="callout-label">Note</span>
+				<p>
+					<code>codex-rs/core/config.schema.json</code> is generated from the Rust
+					types by <code>just write-config-schema</code> — remember the
+					<code>JsonSchema</code> derive from Module&nbsp;2. If you ever want the
+					authoritative list of every setting, read that file rather than the docs.
+				</p>
+			</div>
+		</section>
+
+		<section class="lesson-section" id="thread-born" data-minutes="9">
+			<h2>A thread is born</h2>
+
+			<p>
+				Here is the step that surprises everyone. The TUI does not construct an agent.
+				It starts an <em>app-server</em> — in this process — and speaks JSON-RPC to it:
+			</p>
+
+			<figure class="code">
+				<figcaption><span>codex-rs/app-server-client/src/lib.rs</span><span class="lines">lines 450–453</span></figcaption>
+				<pre><code class="language-rust">pub enum AppServerClient {
+    InProcess(InProcessAppServerClient),
+    Remote(RemoteAppServerClient),
+}</code></pre>
+			</figure>
+
+			<p>
+				<code>InProcess</code> is not a network connection — it is channels and a
+				spawned task, so there are no sockets and nothing crosses a process boundary.
+				But it is the <em>same request and notification types</em> the VS&nbsp;Code
+				extension sends over a real socket. Starting it looks like this:
+			</p>
+
+			<figure class="code">
+				<figcaption><span>codex-rs/app-server-client/src/lib.rs</span><span class="lines">InProcessAppServerClient::start, abridged</span></figcaption>
+				<pre><code class="language-rust">pub async fn start(args: InProcessClientStartArgs) -&gt; IoResult&lt;Self&gt; {
+    let channel_capacity = args.channel_capacity.max(1);
+    let mut handle =
+        codex_app_server::in_process::start(args.into_runtime_start_args()).await?;
+    let request_sender = handle.sender();
+    let (command_tx, mut command_rx) = mpsc::channel::&lt;ClientCommand&gt;(channel_capacity);
+    let (event_tx, event_rx) = mpsc::channel::&lt;InProcessServerEvent&gt;(channel_capacity);
+
+    let worker_handle = tokio::spawn(async move {
+        // … relay commands in, events out …
+    });</code></pre>
+			</figure>
+
+			<p>
+				Two <code>mpsc</code> channels and a spawned task — exactly the pattern from
+				Module&nbsp;2. The TUI then sends a <code>ThreadStart</code> request and gets
+				back a thread id.
+			</p>
+
+			<p>
+				Underneath, the app-server holds a <code>CodexThread</code>, and
+				<em>that</em> is where the two queues live. Its entire public surface for
+				running a conversation is two methods:
+			</p>
+
+			<figure class="code">
+				<figcaption><span>codex-rs/core/src/codex_thread.rs</span><span class="lines">submit and next_event</span></figcaption>
+				<pre><code class="language-rust">pub async fn submit(&amp;self, op: Op) -&gt; CodexResult&lt;String&gt; {
+    self.io.submit(op).await
+}
+
+pub async fn next_event(&amp;self) -&gt; CodexResult&lt;Event&gt; {
+    self.io.next_event().await
+}</code></pre>
+			</figure>
+
+			<p>
+				<code>submit</code> returns the submission id; <code>next_event</code> yields
+				events forever. That is the entire agent API. Everything else in
+				<code>core</code> — 180,000 lines of it — sits behind those two calls. The doc
+				comment on the type says it plainly:
+			</p>
+
+			<figure class="code">
+				<figcaption><span>codex-rs/core/src/codex_thread.rs</span><span class="lines">the impl's doc comment</span></figcaption>
+				<pre><code class="language-rust">/// Conduit for the bidirectional stream of messages that compose a thread
+/// (formerly called a conversation) in Codex.
+impl CodexThread {</code></pre>
+			</figure>
+
+			<p>
+				"Formerly called a conversation" is a small archaeological gift: if you find
+				<code>conversation</code> in older identifiers, it means thread.
+			</p>
+
+			<p>Your prompt now becomes a submission:</p>
+
+			<figure class="code">
+				<figcaption><span>codex-rs/protocol/src/protocol.rs</span><span class="lines">Op::UserInput</span></figcaption>
+				<pre><code class="language-rust">/// User input, optionally with thread-settings overrides applied first.
+UserInput {
+    /// User input items, see `InputItem`
+    items: Vec&lt;UserInput&gt;,
+    /// Optional JSON Schema used to constrain the final assistant message.
+    final_output_json_schema: Option&lt;Value&gt;,
+    /// Optional turn-scoped Responses API `client_metadata`.
+    responsesapi_client_metadata: Option&lt;HashMap&lt;String, String&gt;&gt;,
+    /// Client-supplied context fragments keyed by an opaque source identifier.
+    additional_context: BTreeMap&lt;String, AdditionalContextEntry&gt;,
+    /// Persistent thread-settings overrides to apply before the input.
+    thread_settings: ThreadSettingsOverrides,
+},</code></pre>
+			</figure>
+
+			<p>
+				<code>items</code> is a <code>Vec</code> — a list — because one message can mix
+				text and images. The rest are per-turn knobs: constrain the final answer to a
+				JSON schema, attach metadata, inject extra context, change settings before
+				running.
+			</p>
+		</section>
+
+		<section class="lesson-section" id="building-turn" data-minutes="10">
+			<h2>Building the turn</h2>
+
+			<p>
+				A submission arrives, and the session spawns a <strong>task</strong> to handle
+				it. Tasks are a small trait — this is the dependency-injection pattern from
+				Module&nbsp;2 again:
+			</p>
+
+			<figure class="code">
+				<figcaption><span>codex-rs/core/src/tasks/mod.rs</span><span class="lines">the SessionTask trait, abridged</span></figcaption>
+				<pre><code class="language-rust">/// [`Session`] and executed on a background Tokio task. The trait is
+/// intentionally small: implementers identify themselves via
+/// [`SessionTask::kind`], perform their work in [`SessionTask::run`], and may
+/// release resources in [`SessionTask::abort`].
+pub(crate) trait SessionTask: Send + Sync + 'static {
+    /// Describes the type of work the task performs so the session can
+    /// surface it in telemetry and UI.
+    fn kind(&amp;self) -&gt; TaskKind;
+
+    fn run(
+        self: Arc&lt;Self&gt;,
+        session: Arc&lt;SessionTaskContext&gt;,
+        ctx: Arc&lt;TurnContext&gt;,
+        input: Vec&lt;TurnInput&gt;,
+        cancellation_token: CancellationToken,
+    ) -&gt; impl std::future::Future&lt;Output = SessionTaskResult&gt; + Send;
+}</code></pre>
+			</figure>
+
+			<p>
+				The directory listing of <code class="path">codex-rs/core/src/tasks</code>
+				tells you what kinds exist: <code>regular.rs</code> (an ordinary turn),
+				<code>compact.rs</code> (summarise the conversation), <code>review.rs</code>
+				(code review), <code>user_shell.rs</code> (you ran a shell command yourself).
+				Yours is a regular turn.
+			</p>
+
+			<p>
+				Note <code>cancellation_token</code> in that signature. Every task is
+				cancellable from birth, which is how <kbd>Esc</kbd> can stop a turn mid-flight
+				— Module&nbsp;5 follows it.
+			</p>
+
+			<div class="walkthrough">
+				<figure class="code">
+					<figcaption><span>codex-rs/core/src/tasks/regular.rs</span><span class="lines">RegularTask::run, opening</span></figcaption>
+					<pre><code class="language-rust">let prewarmed_client_session = async {
+    let event = EventMsg::TurnStarted(TurnStartedEvent {
+        turn_id: ctx.sub_id.clone(),
+        trace_id: ctx.trace_id.clone(),
+        started_at: ctx.turn_timing_state.started_at_unix_secs().await,
+        model_context_window: ctx.model_context_window(),
+        collaboration_mode_kind: ctx.mode,
+    });
+    sess.send_event(ctx.as_ref(), event).await;</code></pre>
+				</figure>
+				<p class="anno">
+					The very first thing a turn does is announce itself on the event queue.
+					<code>turn_id</code> is <code>ctx.sub_id</code> — the submission id from
+					earlier — so the UI can immediately tie this activity back to what you
+					typed. The comment above it in the source explains the ordering choice:
+					regular turns emit <code>TurnStarted</code> <em>inline</em> so the first
+					turn's lifecycle doesn't wait on startup prewarming.
+				</p>
+				<figure class="code">
+					<figcaption><span>codex-rs/core/src/session/turn.rs</span><span class="lines">run_turn signature</span></figcaption>
+					<pre><code class="language-rust">pub(crate) async fn run_turn(
+    sess: Arc&lt;Session&gt;,
+    turn_context: Arc&lt;TurnContext&gt;,
+    turn_extension_data: Arc&lt;codex_extension_api::ExtensionData&gt;,
+    input: Vec&lt;TurnInput&gt;,
+    prewarmed_client_session: Option&lt;ModelClientSession&gt;,
+    cancellation_token: CancellationToken,
+) -&gt; CodexResult&lt;Option&lt;String&gt;&gt;</code></pre>
+				</figure>
+				<p class="anno">
+					Everything arrives injected, and everything shared is an
+					<code>Arc</code> — the session, the turn context, the extension data. This
+					is the same "policy-free core" shape you would find in any well-built
+					agent: <code>run_turn</code> owns almost no state, it orchestrates.
+				</p>
+				<figure class="code">
+					<figcaption><span class="lines">building what the model will see</span></figcaption>
+					<pre><code class="language-rust">// Construct the input that we will send to the model.
+let sampling_request_input: Vec&lt;ResponseItem&gt; = async {
+    sess.clone_history()
+        .await
+        .for_prompt(&amp;turn_context.model_info.input_modalities)
+}
+.instrument(trace_span!("run_turn.prepare_sampling_request_input"))
+.await;</code></pre>
+				</figure>
+				<p class="anno">
+					The conversation history is cloned and rendered
+					<code>for_prompt</code> — filtered by what this model can actually accept
+					(<code>input_modalities</code>: does it take images? audio?). This is the
+					moment the internal representation becomes model input. Module&nbsp;5
+					covers the context manager that decides what survives this step.
+				</p>
+			</div>
+
+			<aside class="concept" data-kind="rust">
+				<p class="concept-label">Rust · <code>.instrument(trace_span!(...))</code></p>
+				<p>
+					This wraps a future in a named tracing span, so logs and telemetry emitted
+					anywhere inside it are attributed to
+					<code>run_turn.prepare_sampling_request_input</code>. It is the async
+					answer to "which part of the request was slow?" — and you will see it
+					scattered through <code>core</code>. It has no effect on program logic;
+					mentally skip over it.
+				</p>
+			</aside>
+		</section>
+
+		<section class="lesson-section" id="talking-to-model" data-minutes="8">
+			<h2>Talking to the model</h2>
+
+			<p>
+				Now the agent loop proper. Strip away compaction, hooks, telemetry, and
+				steering, and <code>run_turn</code> is a <code>loop</code> containing one
+				call:
+			</p>
+
+			<figure class="code">
+				<figcaption><span>codex-rs/core/src/session/turn.rs</span><span class="lines">the loop, heavily abridged</span></figcaption>
+				<pre><code class="language-rust">loop {
+    // … drain any input you typed while the model was working …
+    let step_context = /* … */;
+
+    run_sampling_request(
+        Arc::clone(&amp;sess),
+        Arc::clone(&amp;step_context),
+        /* … */
+        sampling_request_input,
+        cancellation_token.child_token(),
+    )
+    .await
+    // …
+    let needs_follow_up = model_needs_follow_up || has_pending_input;
+    // …
+    if !needs_follow_up {
+        break;
+    }
+}</code></pre>
+			</figure>
+
+			<p>
+				There it is: <strong>the agent loop</strong>. Call the model. If the result
+				needs following up — because the model asked to run a tool — go round again.
+				Otherwise stop. Every agent ever written has this shape; the other 400 lines
+				of <code>run_turn</code> are the things that make it survivable in production.
+			</p>
+
+			<aside class="concept" data-kind="llm">
+				<p class="concept-label">LLM · "Sampling" means calling the model</p>
+				<p>
+					<code>run_sampling_request</code> looks like statistics jargon, and it is —
+					generating text from a language model is sampling tokens from a probability
+					distribution. Read <em>sampling request</em> as <em>one API call to the
+					model</em>. A single turn may make many of them: one to decide to read a
+					file, one after seeing the file, one after running a test.
+				</p>
+			</aside>
+
+			<p>
+				Notice <code>cancellation_token.child_token()</code>. Each model call gets a
+				token descended from the turn's, so cancelling the turn cancels the in-flight
+				HTTP request too, rather than waiting politely for it to finish.
+			</p>
+
+			<p>
+				Notice also <code>has_pending_input</code>. If you typed something while the
+				model was working, that alone forces another iteration — your interjection
+				becomes part of the conversation before the turn is allowed to end. That is
+				"steering", and it is why the loop condition is an <code>||</code> rather than
+				just asking the model.
+			</p>
+
+			<p>
+				What <code>run_sampling_request</code> does — building the HTTP request to the
+				Responses API, streaming server-sent events back, turning them into
+				<code>EventMsg</code>s, retrying on rate limits — is Module&nbsp;6.
+			</p>
+		</section>
+
+		<section class="lesson-section" id="tool-call" data-minutes="9">
+			<h2>The model asks to run a command</h2>
+
+			<p>
+				The model replies: <em>"call <code>shell</code> with <code>["rg", "-n", "fn
+				assess", "codex-rs/core/src"]</code>"</em>. Codex must now decide whether to
+				run it — and this is where it differs most from a toy agent.
+			</p>
+
+			<p>
+				The decision is a value, of a type you have already read:
+			</p>
+
+			<figure class="code">
+				<figcaption><span>codex-rs/core/src/safety.rs</span><span class="lines">SafetyCheck</span></figcaption>
+				<pre><code class="language-rust">#[derive(Debug, PartialEq)]
+pub enum SafetyCheck {
+    AutoApprove {
+        sandbox_type: SandboxType,
+        user_explicitly_approved: bool,
+    },
+    AskUser,
+    Reject {
+        reason: String,
+    },
+}</code></pre>
+			</figure>
+
+			<p>
+				Three outcomes, and the type makes it impossible to auto-approve without
+				naming a sandbox. Which outcome you get depends on your approval policy,
+				whether the command only reads, and whether a sandbox is even available on
+				this platform. Here is the shape of that reasoning, from the patch equivalent:
+			</p>
+
+			<figure class="code">
+				<figcaption><span>codex-rs/core/src/safety.rs</span><span class="lines">assess_patch_safety, abridged</span></figcaption>
+				<pre><code class="language-rust">// Only auto-approve when we can actually enforce a sandbox. Otherwise
+// fall back to asking the user because the patch may touch arbitrary
+// paths outside the project.
+match get_platform_sandbox(windows_sandbox_level != WindowsSandboxLevel::Disabled) {
+    Some(sandbox_type) =&gt; SafetyCheck::AutoApprove {
+        sandbox_type,
+        user_explicitly_approved: false,
+    },
+    None =&gt; {
+        if rejects_sandbox_approval {
+            SafetyCheck::Reject { /* … */ }
+        } else {
+            SafetyCheck::AskUser
+        }
+    }
+}</code></pre>
+			</figure>
+
+			<p>
+				Read the comment, then the code: <em>no sandbox available means no
+				auto-approval.</em> The fallback is never "run it anyway" — it is ask, or
+				refuse. Module&nbsp;8 is devoted to this decision and to the three
+				platform-specific cages behind <code>get_platform_sandbox</code>.
+			</p>
+
+			<p>
+				If the answer is <code>AskUser</code>, an approval request goes out on the
+				event queue and the turn <em>waits</em>:
+			</p>
+
+			<figure class="code">
+				<figcaption><span>codex-rs/protocol/src/protocol.rs</span><span class="lines">EventMsg variants, selected</span></figcaption>
+				<pre><code class="language-rust">ExecApprovalRequest(ExecApprovalRequestEvent),
+ExecCommandBegin(ExecCommandBeginEvent),
+ExecCommandOutputDelta(ExecCommandOutputDeltaEvent),
+ExecCommandEnd(ExecCommandEndEvent),</code></pre>
+			</figure>
+
+			<p>
+				Those four names are the entire life of a command, as seen from outside:
+				permission asked, started, output streaming, finished.
+				<code>ExecCommandOutputDelta</code> is why you watch test output scroll by live
+				rather than waiting for a wall of text — the same streaming discipline as the
+				model's own tokens.
+			</p>
+
+			<p>
+				You approve. The command runs inside the sandbox. Its output is captured,
+				truncated if enormous, and appended to the conversation as a tool result.
+				<code>needs_follow_up</code> is true, so the loop goes round again, and the
+				model — now able to see the search results — writes its answer.
+			</p>
+
+			<div class="callout warn">
+				<span class="callout-label">Careful</span>
+				<p>
+					It is tempting to think of the sandbox as a setting. It is not: it is a
+					different <em>execution mechanism</em> per platform — Seatbelt on macOS,
+					Landlock and seccomp on Linux, a restricted token on Windows — each with
+					different capabilities and failure modes. The reason
+					<code>SafetyCheck::AutoApprove</code> is forced to carry a
+					<code>sandbox_type</code> is so that this choice can never be left
+					implicit.
+				</p>
+			</div>
+		</section>
+
+		<section class="lesson-section" id="paper-trail" data-minutes="8">
+			<h2>The paper trail</h2>
+
+			<p>
+				Every event on that queue goes to two places: your screen, and a file.
+			</p>
+
+			<p>
+				The screen path is a loop that would be recognisable in any language. Here it
+				is in <code>codex exec</code>, which is far easier to read than the TUI because
+				it has no rendering to do:
+			</p>
+
+			<figure class="code">
+				<figcaption><span>codex-rs/exec/src/lib.rs</span><span class="lines">the client loop, abridged</span></figcaption>
+				<pre><code class="language-rust">loop {
+    let server_event = tokio::select! {
+        maybe_interrupt = interrupt_rx.recv(), if interrupt_channel_open =&gt; {
+            // … send turn/interrupt, then continue …
+        }
+        maybe_event = client.next_event() =&gt; maybe_event,
+    };
+
+    let Some(server_event) = server_event else {
+        break;
+    };
+
+    match server_event {
+        InProcessServerEvent::ServerRequest(request) =&gt; {
+            handle_server_request(&amp;client, request, &amp;mut error_seen).await;
+        }
+        InProcessServerEvent::ServerNotification(mut notification) =&gt; {
+            // … filter to this thread and turn, then render …
+            match event_processor.process_server_notification(notification) {
+                CodexStatus::Running =&gt; {}
+                CodexStatus::InitiateShutdown =&gt; break,
+            }
+        }
+    }
+}</code></pre>
+			</figure>
+
+			<aside class="concept" data-kind="rust">
+				<p class="concept-label">Rust · <code>tokio::select!</code></p>
+				<p>
+					Waits on several futures at once and proceeds with whichever finishes
+					first, cancelling the others. Here it races "the user pressed Ctrl-C"
+					against "the agent sent an event". Python's nearest equivalent is
+					<code>asyncio.wait(..., return_when=FIRST_COMPLETED)</code>, but
+					<code>select!</code> is a language-level construct and the losing branches
+					are genuinely dropped. Note the <code>, if interrupt_channel_open</code>
+					guard — a branch can be disabled by a condition.
+				</p>
+			</aside>
+
+			<p>
+				Notice the two-way nature: <code>ServerRequest</code> means the
+				<em>agent</em> is asking the <em>client</em> something — that is how an
+				approval prompt reaches you. It isn't a pure event stream; it is a
+				conversation between two peers.
+			</p>
+
+			<h3>The file path</h3>
+
+			<p>
+				The same events are appended to a <strong>rollout</strong> — a per-thread file
+				recording everything that happened. That file is why <code>codex resume</code>
+				and <code>codex fork</code> from Module&nbsp;1's subcommand list can work: the
+				conversation is reconstructed by replaying it. You can see the seams of that
+				design in <code>CodexThread</code>'s API:
+			</p>
+
+			<figure class="code">
+				<figcaption><span>codex-rs/core/src/codex_thread.rs</span><span class="lines">rollout-related methods</span></figcaption>
+				<pre><code class="language-rust">pub async fn ensure_rollout_materialized(&amp;self) { /* … */ }
+pub async fn flush_rollout(&amp;self) -&gt; std::io::Result&lt;()&gt; { /* … */ }
+pub fn rollout_path(&amp;self) -&gt; Option&lt;PathBuf&gt; { /* … */ }</code></pre>
+			</figure>
+
+			<p>
+				"Materialized" is doing real work in that first name: a thread does not get a
+				file on disk until it needs one, so starting Codex and pressing Ctrl-C leaves
+				nothing behind. Module&nbsp;11 covers rollouts, resumption and forking.
+			</p>
+
+			<h3>What you now know</h3>
+
+			<p>
+				Your message became a <code>ClientRequest</code> to an in-process app-server,
+				then an <code>Op::UserInput</code> on a submission queue. A
+				<code>RegularTask</code> spawned, announced <code>TurnStarted</code>, rendered
+				the history for the model, and entered a loop: call the model, and if it wants
+				a tool, judge the tool with <code>SafetyCheck</code>, run it in a sandbox, feed
+				the result back, loop again. Everything the turn did streamed out as
+				<code>Event</code>s, which reached your terminal and a rollout file at the same
+				time.
+			</p>
+
+			<p>
+				That is the whole system in one pass. From here the course stops moving and
+				starts digging — beginning with the vocabulary all of this is written in.
+			</p>
+		</section>
+	</article>
+	<script src="manifest.js"></script>
+	<script src="assets/vendor/highlight.min.js"></script>
+	<script src="assets/js/app.js" defer></script>
+</body>
+</html>

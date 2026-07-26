@@ -1,0 +1,211 @@
+<!doctype html>
+<html lang="en">
+<head>
+	<meta charset="utf-8">
+	<meta name="viewport" content="width=device-width, initial-scale=1">
+	<title>The Message types · pi · Codebase Academy</title>
+	<link rel="stylesheet" href="../assets/css/site.css">
+</head>
+<body>
+	<article class="lesson">
+		<h1>The Message types</h1>
+		<p class="lede">
+			Welcome to the bottom of the stack. <code>pi-ai</code>'s
+			<code>types.ts</code> is 700 lines of pure type definitions — no logic at
+			all — and it is the most load-bearing file in the repository: every layer
+			above speaks these shapes. This module reads it properly, starting with
+			the message vocabulary you glimpsed in Module 2.
+		</p>
+
+		<h2>Content blocks: the atoms</h2>
+		<p>Messages aren't strings; they're lists of typed blocks. Here are all four, verbatim:</p>
+		<figure class="code">
+			<figcaption><span>packages/ai/src/types.ts</span><span class="lines">content blocks, comments trimmed</span></figcaption>
+			<pre><code class="language-typescript">export interface TextContent {
+	type: "text";
+	text: string;
+}
+
+export interface ThinkingContent {
+	type: "thinking";
+	thinking: string;
+	thinkingSignature?: string;
+	/** When true, the thinking content was redacted by safety filters. */
+	redacted?: boolean;
+}
+
+export interface ImageContent {
+	type: "image";
+	data: string; // base64 encoded image data
+	mimeType: string; // e.g., "image/jpeg", "image/png"
+}
+
+export interface ToolCall {
+	type: "toolCall";
+	id: string;
+	name: string;
+	arguments: Record&lt;string, any&gt;;
+	thoughtSignature?: string; // Google-specific
+}</code></pre>
+		</figure>
+		<p>
+			Each block carries its <code>type</code> tag — these are the members of
+			discriminated unions, exactly the pattern from lesson 2.2. The
+			<code>?</code> after a field name means optional (Python's
+			<code>Optional[...]</code> / <code>= None</code> default), and
+			<code>Record&lt;string, any&gt;</code> is "a dict with string keys and
+			unchecked values" — tool arguments arrive as arbitrary JSON and are
+			validated elsewhere.
+		</p>
+
+		<aside class="concept" data-kind="llm">
+			<p class="concept-label">LLM · Thinking content</p>
+			<p>
+				Modern models can "reason" before answering — generating a private
+				chain of thought that improves hard answers. Providers expose it as a
+				distinct content type so clients can display it dimmed, hide it, or
+				bill it separately (thinking tokens cost output-token prices!).
+			</p>
+			<p>
+				The odd fields make sense once you know the round-trip rules:
+				providers require thinking blocks to be sent <em>back</em> in later
+				turns (so the model can build on its own reasoning), and they
+				<em>sign</em> the content — <code>thinkingSignature</code> — to detect
+				tampering. When safety filters redact the text, the encrypted payload
+				still travels in the signature field with <code>redacted: true</code>,
+				preserving multi-turn continuity. Fields like these are fossils of
+				real provider constraints; typed models like this one teach you the
+				API's true shape better than the docs do.
+			</p>
+		</aside>
+
+		<h2>The three messages</h2>
+		<figure class="code">
+			<figcaption><span>packages/ai/src/types.ts</span><span class="lines">the Message union, comments trimmed</span></figcaption>
+			<pre><code class="language-typescript">export interface UserMessage {
+	role: "user";
+	content: string | (TextContent | ImageContent)[];
+	timestamp: number;
+}
+
+export interface AssistantMessage {
+	role: "assistant";
+	content: (TextContent | ThinkingContent | ToolCall)[];
+	api: Api;
+	provider: ProviderId;
+	model: string;
+	usage: Usage;
+	stopReason: StopReason;
+	errorMessage?: string;
+	timestamp: number;
+}
+
+export interface ToolResultMessage&lt;TDetails = any&gt; {
+	role: "toolResult";
+	toolCallId: string;
+	toolName: string;
+	content: (TextContent | ImageContent)[];
+	details?: TDetails;
+	isError: boolean;
+	timestamp: number;
+}
+
+export type Message = UserMessage | AssistantMessage | ToolResultMessage;</code></pre>
+		</figure>
+		<p>
+			Read the <code>content</code> types closely — they encode who may say what:
+		</p>
+		<ul>
+			<li><strong>Users</strong> send text and images. Never tool calls — you can't fake the model asking for something.</li>
+			<li><strong>Assistants</strong> produce text, thinking, and tool calls. Never images (that's a separate image-generation world).</li>
+			<li><strong>Tool results</strong> return text and images (a screenshot tool!), tied back by <code>toolCallId</code>, flagged by <code>isError</code>.</li>
+		</ul>
+		<p>
+			Impossible states are simply unrepresentable. In Python you'd write a
+			validator and a docstring; here the compiler is the validator. Notice too
+			that <code>AssistantMessage</code> is self-documenting about its origin —
+			it permanently records which api/provider/model produced it and what it
+			cost (<code>usage</code>). A conversation can mix Claude and GPT messages,
+			and each remembers its maker. Finally <code>stopReason</code>:
+		</p>
+		<figure class="code">
+			<figcaption><span>packages/ai/src/types.ts</span></figcaption>
+			<pre><code class="language-typescript">export type StopReason = "stop" | "length" | "toolUse" | "error" | "aborted";</code></pre>
+		</figure>
+		<p>
+			Five ways a response can end: naturally, out of room, wanting tools,
+			broken, or cancelled. You've already watched the agent loop branch on
+			three of them. Note that <code>"error"</code> is a <em>value</em> here,
+			not an exception type — the errors-as-data philosophy is baked into the
+			vocabulary itself.
+		</p>
+
+		<aside class="concept" data-kind="ts">
+			<p class="concept-label">TypeScript · Union types and structural typing</p>
+			<p>
+				<code>string | (TextContent | ImageContent)[]</code> reads inside-out
+				like Python's <code>Union[str, list[Union[TextContent, ImageContent]]]</code>:
+				a value that is <em>one of</em> several types. TypeScript makes unions
+				cheap and ubiquitous — even string literals form types, which is how
+				<code>StopReason</code> can be "one of these five exact strings" with
+				zero runtime machinery. (Compare Python, where you'd reach for an
+				<code>Enum</code> class.)
+			</p>
+			<p>
+				The second idea is <strong>structural typing</strong>: a value
+				satisfies <code>UserMessage</code> if it <em>has the right fields</em>,
+				period. Nothing is ever "an instance of" UserMessage — no class
+				exists, no constructor ran. Any object literal, JSON from disk, or
+				network payload with <code>role: "user"</code>, valid
+				<code>content</code>, and a <code>timestamp</code> <em>is</em> a
+				UserMessage. Python's <code>Protocol</code> is the same idea
+				(duck typing, formalized); here it's the default for everything.
+				That's why session files (lesson 2.7) can be parsed straight back
+				into typed messages — the types describe data, not objects.
+			</p>
+		</aside>
+
+		<h2>Why this vocabulary is the whole ballgame</h2>
+		<p>
+			Every provider speaks a different dialect: Anthropic nests content blocks
+			one way, OpenAI another, Google a third; tool calls appear in three
+			incompatible formats. pi's answer is this <em>normalized</em> vocabulary:
+			the rest of the system speaks only these types, and each provider adapter
+			(Module 4) translates to and from its dialect at the edge. That's what
+			"unified LLM API" means concretely — the union of everyone's concepts,
+			with the differences confined to files you rarely read.
+		</p>
+
+		<figure class="diagram">
+			<div class="drow">
+				<div class="dbox faded"><span class="dbox-title">Anthropic JSON</span></div>
+				<div class="dbox faded"><span class="dbox-title">OpenAI JSON</span></div>
+				<div class="dbox faded"><span class="dbox-title">Google JSON</span></div>
+			</div>
+			<span class="darrow">↕ <span class="dlabel">translated at the edge (Module 4)</span></span>
+			<div class="drow">
+				<div class="dbox accent"><span class="dbox-title">Message / ToolCall / Usage / StopReason</span><span class="dbox-sub">the one vocabulary everything else speaks</span></div>
+			</div>
+			<span class="darrow">↑ <span class="dlabel">used by</span></span>
+			<div class="drow">
+				<div class="dbox"><span class="dbox-title">agent loop</span></div>
+				<div class="dbox"><span class="dbox-title">session files</span></div>
+				<div class="dbox"><span class="dbox-title">TUI</span></div>
+				<div class="dbox"><span class="dbox-title">extensions</span></div>
+			</div>
+		</figure>
+
+		<h2>What you now know</h2>
+		<p>
+			Four content atoms, three message shapes, five stop reasons — a small,
+			carefully closed vocabulary in which impossible conversations don't
+			typecheck. Next: the <code>Tool</code> type, and the runtime-schema trick
+			that lets one definition serve the compiler, the validator, and the model
+			at once.
+		</p>
+	</article>
+	<script src="../manifest.js"></script>
+	<script src="../assets/vendor/highlight.min.js"></script>
+	<script src="../assets/js/app.js" defer></script>
+</body>
+</html>

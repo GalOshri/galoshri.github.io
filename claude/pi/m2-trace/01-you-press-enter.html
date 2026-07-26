@@ -1,0 +1,150 @@
+<!doctype html>
+<html lang="en">
+<head>
+	<meta charset="utf-8">
+	<meta name="viewport" content="width=device-width, initial-scale=1">
+	<title>You press Enter · pi · Codebase Academy</title>
+	<link rel="stylesheet" href="../assets/css/site.css">
+</head>
+<body>
+	<article class="lesson">
+		<h1>You press Enter</h1>
+		<p class="lede">
+			For the next seven lessons we follow one message through the whole machine.
+			You've started <code>pi</code> in some project and typed:
+			<strong>"what does package.json do?"</strong> — and now you press Enter.
+			This lesson covers the journey's first inch: from keystroke to a call on
+			the agent.
+		</p>
+
+		<div class="callout note">
+			<span class="callout-label">How to read this module</span>
+			<p>
+				We fly at 500 feet. Every stop on the route gets a sentence of "how"
+				and a pointer to the module that gives it the full treatment. If a
+				detail nags at you — good; a later module almost certainly scratches
+				that itch.
+			</p>
+		</div>
+
+		<h2>Setting: a terminal in raw mode</h2>
+		<p>
+			A terminal normally handles typing for you: it echoes characters, lets you
+			backspace, and delivers input to the program only when you press Enter
+			(so-called "cooked" mode). A rich interface like pi's can't live with that —
+			it needs every keystroke as it happens, to update the display, offer
+			autocompletions, and react to shortcuts. So on startup pi switches the
+			terminal to <strong>raw mode</strong>: echo off, buffering off, every key
+			delivered immediately as bytes. From that moment, everything you see on
+			screen — including the characters you "type" — is drawn by pi itself.
+			(Module 9 covers this machinery in loving detail.)
+		</p>
+		<p>
+			Your keystrokes flow into an <strong>Editor</strong> component — a
+			from-scratch text editor (2,300 lines! with undo, kill-ring, autocomplete)
+			that pi renders at the bottom of the screen. As far as this module is
+			concerned it's a text box. What matters is what happens when Enter arrives.
+		</p>
+
+		<h2>The submit handler</h2>
+		<p>
+			The interactive mode — the class driving the whole visible app — wires the
+			editor's submit event to a function. Here is the real code, with its long
+			middle elided:
+		</p>
+
+		<figure class="code">
+			<figcaption><span>packages/coding-agent/src/modes/interactive/interactive-mode.ts</span><span class="lines">setupEditorSubmitHandler, abridged</span></figcaption>
+			<pre><code class="language-typescript">private setupEditorSubmitHandler(): void {
+	this.defaultEditor.onSubmit = async (text: string) => {
+		text = text.trim();
+		if (!text) return;
+
+		// Handle commands
+		if (text === "/settings") {
+			this.showSettingsSelector();
+			this.editor.setText("");
+			return;
+		}
+		if (text === "/model" || text.startsWith("/model ")) {
+			// ...
+		}
+		// ... ~40 more slash commands: /export, /share, /resume, /fork, ...
+
+		// Not a command — it's a prompt for the model:
+		await this.session.prompt(text);
+	};
+}</code></pre>
+		</figure>
+
+		<p>Three things worth noticing, because they're patterns you'll see everywhere:</p>
+		<ul>
+			<li>
+				<strong>The handler is assigned, not inherited.</strong>
+				<code>onSubmit</code> is just a property on the editor that holds a
+				function. The editor knows nothing about agents or slash commands; it
+				calls whatever function was plugged in. This is how the layers from
+				lesson 1.4 stay separate in practice — the TUI component stays generic,
+				the app supplies meaning.
+			</li>
+			<li>
+				<strong>Slash commands are intercepted before the model ever sees
+				them.</strong> <code>/model</code>, <code>/settings</code> and friends
+				are app features, not conversation. Only ordinary text falls through to
+				the bottom. (Module 7 returns to slash commands.)
+			</li>
+			<li>
+				<strong>The fall-through is one line.</strong>
+				<code>await this.session.prompt(text)</code>. All the UI drama above it,
+				and the actual "do AI things" entry point is a single method call.
+			</li>
+		</ul>
+
+		<h2>What is <code>this.session</code>?</h2>
+		<p>
+			It's an <code>AgentSession</code> — the coding agent's central object,
+			which wraps the raw <code>Agent</code> from <code>pi-agent-core</code> and
+			adds everything a product needs: saving the conversation to disk, loading
+			settings, running extensions, tracking cost. Think of it as the
+			<em>application-grade</em> agent. Module 6 dissects it; for this trace you
+			only need its role as the doorway between the UI and the agent machinery:
+		</p>
+
+		<figure class="diagram">
+			<div class="drow">
+				<div class="dbox"><span class="dbox-title">Editor</span><span class="dbox-sub">captures keystrokes</span></div>
+				<span class="darrow">→ <span class="dlabel">onSubmit(text)</span></span>
+				<div class="dbox"><span class="dbox-title">InteractiveMode</span><span class="dbox-sub">slash commands? no →</span></div>
+				<span class="darrow">→ <span class="dlabel">prompt(text)</span></span>
+				<div class="dbox accent"><span class="dbox-title">AgentSession</span><span class="dbox-sub">the product wrapper</span></div>
+				<span class="darrow">→</span>
+				<div class="dbox"><span class="dbox-title">Agent</span><span class="dbox-sub">next lesson</span></div>
+			</div>
+			<figcaption class="dcaption">The first inch: four hops, each a plain method call, each crossing one layer boundary.</figcaption>
+		</figure>
+
+		<div class="callout note">
+			<span class="callout-label">Note · the 5,780-line elephant</span>
+			<p>
+				<code>interactive-mode.ts</code>, the file we just excerpted, is the
+				largest hand-written file in the repository — nearly six thousand lines.
+				Not every part of a well-architected codebase is small; UI glue
+				accumulates. Lesson 6.3 teaches the technique for reading files like it
+				without drowning.
+			</p>
+		</div>
+
+		<h2>What you now know</h2>
+		<p>
+			Enter pressed → editor fires <code>onSubmit</code> → interactive mode rules
+			out slash commands → <code>session.prompt("what does package.json do?")</code>.
+			Your words are still an ordinary string. In the next lesson they become a
+			<em>message</em> — the data structure the whole system revolves around —
+			and meet the Agent.
+		</p>
+	</article>
+	<script src="../manifest.js"></script>
+	<script src="../assets/vendor/highlight.min.js"></script>
+	<script src="../assets/js/app.js" defer></script>
+</body>
+</html>

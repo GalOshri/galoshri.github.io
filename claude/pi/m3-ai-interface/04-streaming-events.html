@@ -1,0 +1,166 @@
+<!doctype html>
+<html lang="en">
+<head>
+	<meta charset="utf-8">
+	<meta name="viewport" content="width=device-width, initial-scale=1">
+	<title>The streaming event grammar · pi · Codebase Academy</title>
+	<link rel="stylesheet" href="../assets/css/site.css">
+</head>
+<body>
+	<article class="lesson">
+		<h1>The streaming event grammar</h1>
+		<p class="lede">
+			Every streaming response in pi — from any of a thousand models — is
+			narrated in one event language. You've consumed it twice already (in the
+			agent loop, and indirectly on screen). Now read the full grammar, and
+			learn the TypeScript idiom that makes consuming it safe: exhaustive
+			narrowing.
+		</p>
+
+		<h2>The union, complete</h2>
+		<figure class="code wide">
+			<figcaption><span>packages/ai/src/types.ts</span><span class="lines">AssistantMessageEvent, verbatim</span></figcaption>
+			<pre><code class="language-typescript">export type AssistantMessageEvent =
+	| { type: "start"; partial: AssistantMessage }
+	| { type: "text_start"; contentIndex: number; partial: AssistantMessage }
+	| { type: "text_delta"; contentIndex: number; delta: string; partial: AssistantMessage }
+	| { type: "text_end"; contentIndex: number; content: string; partial: AssistantMessage }
+	| { type: "thinking_start"; contentIndex: number; partial: AssistantMessage }
+	| { type: "thinking_delta"; contentIndex: number; delta: string; partial: AssistantMessage }
+	| { type: "thinking_end"; contentIndex: number; content: string; partial: AssistantMessage }
+	| { type: "toolcall_start"; contentIndex: number; partial: AssistantMessage }
+	| { type: "toolcall_delta"; contentIndex: number; delta: string; partial: AssistantMessage }
+	| { type: "toolcall_end"; contentIndex: number; toolCall: ToolCall; partial: AssistantMessage }
+	| { type: "done"; reason: Extract&lt;StopReason, "stop" | "length" | "toolUse"&gt;; message: AssistantMessage }
+	| { type: "error"; reason: Extract&lt;StopReason, "aborted" | "error"&gt;; error: AssistantMessage };</code></pre>
+		</figure>
+		<p>Twelve shapes, but really a 3×3 grid plus bookends:</p>
+		<ul>
+			<li>
+				<strong>Three content kinds</strong> (text, thinking, toolcall) ×
+				<strong>three phases</strong> (start, delta, end). A block opens at
+				some <code>contentIndex</code> in the message's content array, grows
+				by deltas, and closes — <code>_end</code> carrying the assembled
+				whole (note <code>toolcall_end</code> delivers a finished, parsed
+				<code>ToolCall</code>).
+			</li>
+			<li>
+				<strong>One opener</strong>, <code>start</code>, when the provider
+				accepts the request.
+			</li>
+			<li>
+				<strong>Two closers</strong>, exactly one of which ends every stream:
+				<code>done</code> or <code>error</code>. Look at the closers' types:
+				<code>Extract&lt;StopReason, "stop" | "length" | "toolUse"&gt;</code>
+				means "the subset of StopReason that indicates success" — the type
+				system enforcing that a <code>done</code> event can't claim it ended
+				in an error, and vice versa.
+			</li>
+		</ul>
+		<p>
+			And the design decision you already know from lesson 2.4: <em>every</em>
+			event carries <code>partial</code>, the full message-so-far. Consumers
+			that care about fine structure use the deltas; consumers that just want
+			"the current state of the reply" read <code>partial</code> and stay
+			trivially correct.
+		</p>
+
+		<h2>A stream, transcribed</h2>
+		<p>Our Module 2 tool-call response, as the actual event sequence:</p>
+		<figure class="code">
+			<figcaption><span>event trace</span><span class="lines">"I'll take a look" + read(package.json)</span></figcaption>
+			<pre><code class="language-text">start                              content: []
+text_start        contentIndex: 0  content: [text ""]
+text_delta        "I'll take"      content: [text "I'll take"]
+text_delta        " a look at"     ...
+text_delta        " the file."
+text_end          contentIndex: 0
+toolcall_start    contentIndex: 1  content: [text, toolCall read {}]
+toolcall_delta    '{"pa'            arguments so far: {}
+toolcall_delta    'th": "packa'     arguments so far: { path: "packa" }
+toolcall_delta    'ge.json"}'       arguments so far: { path: "package.json" }
+toolcall_end      contentIndex: 1  toolCall: read { path: "package.json" }
+done              reason: "toolUse"</code></pre>
+		</figure>
+		<p>
+			Notice the tool call's arguments streaming as <em>fragments of JSON
+			text</em> — <code>'{"pa'</code> is not valid JSON! The adapter
+			re-parses the accumulated fragment after each delta with a
+			forgiving parser, which is why the UI can show
+			<code>read package.json</code> forming before the call is complete.
+			Broken-JSON tolerance isn't an edge case in this world; it's the steady
+			state (lesson 4.5).
+		</p>
+
+		<aside class="concept" data-kind="ts">
+			<p class="concept-label">TypeScript · switch narrowing and exhaustiveness</p>
+			<p>
+				Here is the full power of a discriminated union when you consume it:
+			</p>
+			<figure class="code">
+				<pre><code class="language-typescript">function describe(event: AssistantMessageEvent): string {
+	switch (event.type) {
+		case "text_delta":
+			return event.delta;            // ok: text_delta has delta
+		case "toolcall_end":
+			return event.toolCall.name;    // ok: only toolcall_end has toolCall
+		case "done":
+			return event.message.model;    // event.delta here = compile error
+		// ...
+		default: {
+			const unhandled: never = event; // exhaustiveness check
+			throw new Error(`Unhandled: ${unhandled}`);
+		}
+	}
+}</code></pre>
+			</figure>
+			<p>
+				Inside each <code>case</code>, the compiler <em>narrows</em>
+				<code>event</code> to that single shape — fields from other shapes
+				don't exist. The <code>default</code> trick is the pro move: if every
+				case is handled, <code>event</code> has type <code>never</code>
+				("nothing can reach here") and the assignment compiles. Add a
+				thirteenth event to the union next year, and every switch written
+				this way <em>fails to compile</em> until someone handles it. Python's
+				<code>match</code> plus mypy can approximate this; in this codebase
+				it's the standard safety net around every union you've met.
+			</p>
+		</aside>
+
+		<h2>One grammar, many dialects</h2>
+		<p>
+			Here's why this union earns its keep. Anthropic's wire protocol sends
+			<code>content_block_start</code> / <code>content_block_delta</code>;
+			OpenAI sends <code>choices[0].delta</code> fragments; Google sends
+			candidate chunks. Every adapter's whole job (next module) is translating
+			its dialect <em>into this grammar</em>. Above the adapter line, nobody —
+			not the loop, not the UI, not your extension — ever sees a provider
+			event again. When you hear "unified streaming API," this union is the
+			unification.
+		</p>
+
+		<div class="callout note">
+			<span class="callout-label">Note · events vs. the Agent's events</span>
+			<p>
+				Keep the two unions straight: <code>AssistantMessageEvent</code>
+				(this lesson) narrates <em>one response being generated</em>;
+				<code>AgentEvent</code> (lesson 2.2) narrates <em>a whole agent run</em>
+				— turns, tools, lifecycle. The loop consumes the first and produces
+				the second; you watched it do so, case by case, in lesson 2.4's
+				switch statement.
+			</p>
+		</div>
+
+		<h2>What you now know</h2>
+		<p>
+			Twelve event shapes — 3×3 content grid plus start/done/error — with a
+			full snapshot on every event and errors as first-class citizens. Next
+			lesson we build the pipe these events flow through:
+			<code>EventStream</code>, pi's hand-rolled async iterable, in 89 lines.
+		</p>
+	</article>
+	<script src="../manifest.js"></script>
+	<script src="../assets/vendor/highlight.min.js"></script>
+	<script src="../assets/js/app.js" defer></script>
+</body>
+</html>

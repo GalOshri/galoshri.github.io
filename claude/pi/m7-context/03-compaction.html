@@ -1,0 +1,141 @@
+<!doctype html>
+<html lang="en">
+<head>
+	<meta charset="utf-8">
+	<meta name="viewport" content="width=device-width, initial-scale=1">
+	<title>Compaction: forgetting gracefully · pi · Codebase Academy</title>
+	<link rel="stylesheet" href="../assets/css/site.css">
+</head>
+<body>
+	<article class="lesson">
+		<h1>Compaction: forgetting gracefully</h1>
+		<p class="lede">
+			Every long agent session marches toward the same wall: the conversation
+			outgrows the context window. Compaction is how pi forgets on purpose —
+			the real algorithm, with its real numbers, from
+			<code class="path">core/compaction/compaction.ts</code>.
+		</p>
+
+		<h2>When: two budgets</h2>
+		<figure class="code">
+			<figcaption><span>packages/coding-agent/src/core/compaction/compaction.ts</span><span class="lines">the settings + trigger, verbatim</span></figcaption>
+			<pre><code class="language-typescript">export const DEFAULT_COMPACTION_SETTINGS: CompactionSettings = {
+	enabled: true,
+	reserveTokens: 16384,
+	keepRecentTokens: 20000,
+};
+
+export function shouldCompact(contextTokens: number, contextWindow: number, settings: CompactionSettings): boolean {
+	if (!settings.enabled) return false;
+	return contextTokens &gt; contextWindow - settings.reserveTokens;
+}</code></pre>
+		</figure>
+		<p>
+			<strong><code>reserveTokens</code></strong> answers "when": compact
+			once the conversation crosses <em>window minus 16k</em> — headroom for
+			one more full response plus the summarization call itself. Trigger at
+			100% and you've already failed; the margin is the design.
+			<strong><code>keepRecentTokens</code></strong> answers "how much
+			survives": about 20k tokens of the newest turns stay verbatim, because
+			recent context is what the model is actively working from.
+		</p>
+		<p>
+			And where does <code>contextTokens</code> come from? Not from counting
+			words — from the <em>provider's own usage report</em> on the last
+			assistant message (<code>calculateContextTokens</code> reads the
+			<code>Usage</code> record from lesson 4.6, skipping error/aborted
+			messages whose usage is garbage). The bill doubles as the fuel gauge.
+		</p>
+
+		<h2>Where: the cut point</h2>
+		<figure class="code">
+			<figcaption><span>packages/coding-agent/src/core/compaction/compaction.ts</span><span class="lines">findCutPoint's contract, from its doc comment</span></figcaption>
+			<pre><code class="language-typescript">/**
+ * Find the cut point in session entries that keeps approximately `keepRecentTokens`.
+ *
+ * Algorithm: Walk backwards from newest, accumulating estimated message sizes.
+ * Stop when we've accumulated &gt;= keepRecentTokens. Cut at that point.
+ *
+ * Can cut at user OR assistant messages (never tool results). When cutting at an
+ * assistant message with tool calls, its tool results come after and will be kept.
+ */</code></pre>
+		</figure>
+		<p>
+			The invariant hiding in that comment — <em>never cut at a tool
+			result</em> — is load-bearing. Providers reject a conversation
+			containing a tool result whose originating tool <em>call</em> is
+			missing; slice carelessly and every future request 400s. Valid cut
+			points respect the call/result pairing, and the walk-backwards loop
+			(you saw it verbatim earlier: accumulate estimated sizes newest-first,
+			stop at the budget, snap to the nearest valid cut) chooses among them.
+			Structure-aware truncation, not scissors.
+		</p>
+
+		<h2>What replaces the past: a model-written summary</h2>
+		<p>
+			Everything before the cut gets sent — one last time — to the model,
+			with a summarization system prompt asking for a structured digest:
+			what was the task, what was done, what was learned, what's pending.
+			The result becomes a <code>compaction</code> entry in the session file
+			(recording the summary, the cut point, and <code>tokensBefore</code>),
+			and future context is assembled as:
+		</p>
+		<figure class="diagram">
+			<div class="drow">
+				<div class="dbox faded"><span class="dbox-title">old turns</span><span class="dbox-sub">still in the file,<br>no longer sent</span></div>
+				<span class="darrow">→ <span class="dlabel">became</span></span>
+				<div class="dbox accent"><span class="dbox-title">summary message</span><span class="dbox-sub">~1k tokens</span></div>
+				<span class="darrow">+</span>
+				<div class="dbox"><span class="dbox-title">recent turns</span><span class="dbox-sub">~20k tokens, verbatim</span></div>
+				<span class="darrow">=</span>
+				<div class="dbox"><span class="dbox-title">next context</span><span class="dbox-sub">room to work again</span></div>
+			</div>
+			<figcaption class="dcaption">The session file keeps everything; compaction changes only what the model sees. Rewind past a compaction and the full history is still there.</figcaption>
+		</figure>
+
+		<aside class="concept" data-kind="llm">
+			<p class="concept-label">LLM · Summarization as memory</p>
+			<p>
+				Every long-running LLM system needs a memory hierarchy, because
+				attention is fixed and history is not. The emerging standard looks
+				remarkably like an operating system's: <em>recent turns</em> stay
+				verbatim (RAM), <em>older history</em> gets compressed into prose
+				summaries (swap), and the <em>full record</em> lives on disk (cold
+				storage), re-derivable but not resident.
+			</p>
+			<p>
+				Know the failure mode: summaries are lossy in ways the summarizer
+				can't predict — the "irrelevant" detail from turn 3 that turn 40
+				desperately needs may not survive. Mitigations, all visible in pi:
+				keep generous recent context, summarize with a purpose-built prompt
+				rather than "tldr", let users trigger <code>/compact</code> at
+				natural boundaries, and never destroy the underlying record. When
+				pi seems to "forget" something mid-marathon, you now know exactly
+				which mechanism forgot it — and that the session file didn't.
+			</p>
+		</aside>
+
+		<h2>Who pulls the trigger</h2>
+		<p>
+			Auto-compaction runs from <code>AgentSession</code> between turns —
+			via the loop's <code>prepareNextTurn</code> hook (lesson 5.2), which
+			exists precisely so the context can be swapped at a turn boundary.
+			Manual <code>/compact</code> does the same on demand. And on context
+			<em>overflow</em> errors (the retry lesson's other branch), compaction
+			is the cure that runs before any retry. Three triggers, one mechanism.
+		</p>
+
+		<h2>What you now know</h2>
+		<p>
+			Compaction = a headroom trigger read off the provider's own usage
+			numbers, a structure-respecting cut point, a purpose-prompted summary,
+			and an append-only record that never actually forgets. Next: the other
+			half of what the model sees every turn — the system prompt pi builds
+			for it.
+		</p>
+	</article>
+	<script src="../manifest.js"></script>
+	<script src="../assets/vendor/highlight.min.js"></script>
+	<script src="../assets/js/app.js" defer></script>
+</body>
+</html>

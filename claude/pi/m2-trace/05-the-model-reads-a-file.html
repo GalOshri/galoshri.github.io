@@ -1,0 +1,167 @@
+<!doctype html>
+<html lang="en">
+<head>
+	<meta charset="utf-8">
+	<meta name="viewport" content="width=device-width, initial-scale=1">
+	<title>The model asks to read a file · pi · Codebase Academy</title>
+	<link rel="stylesheet" href="../assets/css/site.css">
+</head>
+<body>
+	<article class="lesson">
+		<h1>The model asks to read a file</h1>
+		<p class="lede">
+			The model can't answer "what does package.json do?" without seeing the
+			file — and it can't see anything. So its reply is not an answer but a
+			request. This lesson is about tool calling: the contract that lets a text
+			predictor operate machinery.
+		</p>
+
+		<h2>What the model actually sent back</h2>
+		<p>
+			The assistant message assembled by last lesson's stream looks like this —
+			slightly simplified, but shape-accurate:
+		</p>
+		<figure class="code">
+			<figcaption><span>in memory</span><span class="lines">the assistant's first reply</span></figcaption>
+			<pre><code class="language-json">{
+	"role": "assistant",
+	"content": [
+		{ "type": "text", "text": "I'll take a look at the file." },
+		{
+			"type": "toolCall",
+			"id": "toolu_01XkP...",
+			"name": "read",
+			"arguments": { "path": "package.json" }
+		}
+	],
+	"stopReason": "toolUse",
+	"model": "claude-sonnet-4-5",
+	"usage": { "input": 4520, "output": 62, "...": "..." }
+}</code></pre>
+		</figure>
+		<p>
+			Now the block-list structure of <code>content</code> from lesson 2.2 pays
+			off: one message can hold prose <em>and</em> a structured request,
+			side by side. The <code>toolCall</code> block is machine-readable — a
+			name, arguments as JSON, and an <code>id</code> so the result can be
+			matched back if several calls run at once. And <code>stopReason:
+			"toolUse"</code> is exactly what the loop's
+			<code>content.filter((c) =&gt; c.type === "toolCall")</code> is waiting
+			for.
+		</p>
+
+		<aside class="concept" data-kind="llm">
+			<p class="concept-label">LLM · Tool calling</p>
+			<p>
+				How does a text generator emit structured requests? By agreement.
+				With each API call, the client sends <em>tool definitions</em>: name,
+				human-readable description, and a <strong>JSON Schema</strong> of the
+				parameters. The model was trained to respond, when appropriate, with a
+				special kind of output that providers parse and return as a distinct
+				content block — not prose. The client executes whatever the call
+				describes and sends back a <em>tool result message</em>; the model
+				reads it and continues.
+			</p>
+			<p>
+				Two things to keep straight. First, <strong>the model never executes
+				anything</strong> — it only ever produces the <em>request</em>; all
+				power stays in the client, which is why pi (not the model) is the
+				security boundary. Second, the model can and does get it wrong:
+				misspelled tool names, arguments that violate the schema, JSON cut off
+				mid-string. Real systems validate every call — pi does, with the same
+				schema objects, before anything runs.
+			</p>
+		</aside>
+
+		<h2>The tool on the other end</h2>
+		<p>
+			Where did the model get the idea that a tool named <code>read</code>
+			exists? pi told it, in the <code>tools</code> field of the request. Each
+			tool's schema is declared in code — here's the real one:
+		</p>
+		<figure class="code">
+			<figcaption><span>packages/coding-agent/src/core/tools/read.ts</span><span class="lines">lines 20–24</span></figcaption>
+			<pre><code class="language-typescript">const readSchema = Type.Object({
+	path: Type.String({ description: "Path to the file to read (relative or absolute)" }),
+	offset: Type.Optional(Type.Number({ description: "Line number to start reading from (1-indexed)" })),
+	limit: Type.Optional(Type.Number({ description: "Maximum number of lines to read" })),
+});</code></pre>
+		</figure>
+		<p>
+			<code>Type.Object(...)</code> comes from a library called TypeBox — think
+			pydantic: a schema that exists at runtime (it converts to the JSON Schema
+			sent to the model, and validates incoming arguments) <em>and</em> gives
+			TypeScript the compile-time types. One definition, three jobs. Lesson 3.2
+			dwells on this trick, which the entire tool system rests on.
+		</p>
+		<p>
+			The tool also has an <code>execute</code> function. For <code>read</code>
+			it does roughly what you'd guess — resolve the path, read the file — plus
+			the unglamorous production concerns that make up most of its 350 lines:
+			cap output at a line/byte budget so a huge file can't flood the
+			conversation, detect images and attach them properly, prefix line numbers.
+			Module 6 reads all seven tools closely.
+		</p>
+
+		<h2>The result goes back as a message</h2>
+		<p>
+			The loop (via <code>executeToolCalls</code>, which validates arguments,
+			runs hooks, and catches errors — Module 5) invokes the tool and wraps
+			whatever comes back as a third kind of message:
+		</p>
+		<figure class="code">
+			<figcaption><span>in memory</span><span class="lines">the tool result, appended to the conversation</span></figcaption>
+			<pre><code class="language-json">{
+	"role": "toolResult",
+	"toolCallId": "toolu_01XkP...",
+	"toolName": "read",
+	"content": [
+		{ "type": "text", "text": "1: {\n2: \t\"name\": \"my-project\",\n3: \t\"version\": \"1.2.0\",\n4: \t\"scripts\": {\n..." }
+	],
+	"isError": false
+}</code></pre>
+		</figure>
+		<p>
+			Note <code>isError</code>: if the file hadn't existed, the failure text
+			would ride back in the same envelope with <code>isError: true</code>, and
+			the <em>model</em> would decide what to do about it — try another path,
+			ask you, apologize. Failures are conversation, not crashes. It's the same
+			philosophy you saw in the stream (errors as events), applied one layer up.
+		</p>
+
+		<h2>Around the loop once more</h2>
+		<p>
+			The conversation now reads: <em>user question → assistant "I'll look" +
+			tool call → tool result with the file's contents</em>. The inner loop
+			turns, ships the whole thing to the model again, and this time the model
+			has everything it needs. Its second reply is pure prose — "This
+			package.json defines your project's metadata, dependencies, and the
+			scripts you can run with npm run…" — with
+			<code>stopReason: "stop"</code>. No tool calls; the loop ends.
+		</p>
+
+		<figure class="diagram">
+			<div class="drow">
+				<div class="dbox"><span class="dbox-title">turn 1</span><span class="dbox-sub">model sees: question<br>replies: toolCall(read)</span></div>
+				<span class="darrow">→ <span class="dlabel">execute</span></span>
+				<div class="dbox"><span class="dbox-title">toolResult</span><span class="dbox-sub">file contents</span></div>
+				<span class="darrow">→</span>
+				<div class="dbox accent"><span class="dbox-title">turn 2</span><span class="dbox-sub">model sees: question + call + result<br>replies: the answer</span></div>
+			</div>
+			<figcaption class="dcaption">Agency in miniature: two model calls with a tool execution between them.</figcaption>
+		</figure>
+
+		<h2>What you now know</h2>
+		<p>
+			Tool calling is a three-message dance — request block, execution,
+			result message — governed by schemas the client declares and validates.
+			The model supplies intent; pi supplies capability and safety. Our traced
+			answer now exists in memory. Two lessons remain: how it reached your
+			eyes, and how it reached your disk.
+		</p>
+	</article>
+	<script src="../manifest.js"></script>
+	<script src="../assets/vendor/highlight.min.js"></script>
+	<script src="../assets/js/app.js" defer></script>
+</body>
+</html>

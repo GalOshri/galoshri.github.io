@@ -1,0 +1,229 @@
+<!doctype html>
+<html lang="en">
+<head>
+	<meta charset="utf-8">
+	<meta name="viewport" content="width=device-width, initial-scale=1">
+	<title>How to read TypeScript (coming from Python) · pi · Codebase Academy</title>
+	<link rel="stylesheet" href="../assets/css/site.css">
+</head>
+<body>
+	<article class="lesson">
+		<h1>How to read TypeScript (coming from Python)</h1>
+		<p class="lede">
+			You don't need to <em>write</em> TypeScript to understand this codebase —
+			you need to read it comfortably. This lesson walks through one small, real
+			file from pi, line by line, and builds your translation dictionary from
+			Python as we go.
+		</p>
+
+		<h2>The specimen</h2>
+		<p>
+			Our file is <code class="path">packages/ai/src/utils/json-parse.ts</code>.
+			Its job is delightfully concrete: language models sometimes emit broken
+			JSON (a raw newline inside a string, an invalid escape like <code>\d</code>),
+			and this file repairs it. Under 100 lines, no clever abstractions —
+			perfect first read.
+		</p>
+
+		<h2>Part 1: the imports</h2>
+		<div class="walkthrough">
+			<figure class="code">
+				<figcaption><span>packages/ai/src/utils/json-parse.ts</span><span class="lines">lines 1–3</span></figcaption>
+				<pre><code class="language-typescript">import { parse as partialParse } from "partial-json";
+
+const VALID_JSON_ESCAPES = new Set(['"', "\\", "/", "b", "f", "n", "r", "t", "u"]);</code></pre>
+			</figure>
+			<p class="anno">
+				Line 1 is Python's <code>from partial_json import parse as partial_parse</code>,
+				written backwards: the names first, the module last. The string
+				<code>"partial-json"</code> names an npm package (an external dependency);
+				you'll also see relative imports like <code>"./types.ts"</code> which work
+				like Python's <code>from .types import …</code>.
+			</p>
+			<p class="anno">
+				Line 3: <code>const</code> declares a variable that can't be reassigned
+				(Python has no true equivalent — think of it as an enforced convention
+				that most variables get). <code>new Set([...])</code> is exactly Python's
+				<code>set(...)</code>. Note the naming convention: <code>SCREAMING_CASE</code>
+				for constants, <code>camelCase</code> for everything else where Python
+				uses <code>snake_case</code>.
+			</p>
+		</div>
+
+		<aside class="concept" data-kind="node">
+			<p class="concept-label">Node.js · ES modules, and pi's <code>.ts</code> imports</p>
+			<p>
+				JavaScript historically had several competing import systems. The modern
+				standard — <strong>ES modules</strong> (ESM) — is the
+				<code>import</code>/<code>export</code> syntax you see here, and pi uses it
+				exclusively (<code>"type": "module"</code> in every package.json). Anything
+				a file wants to expose, it marks with <code>export</code>; there's no
+				Python-style "everything is importable" — unexported names are truly
+				private to the file.
+			</p>
+			<p>
+				One pi quirk: relative imports include the file extension —
+				<code>import … from "./types.ts"</code>. Node can strip types and run
+				<code>.ts</code> files directly nowadays, and pi leans into that; the
+				compiler rewrites the extension to <code>.js</code> when building the
+				published output.
+			</p>
+		</aside>
+
+		<h2>Part 2: a typed function</h2>
+		<div class="walkthrough">
+			<figure class="code">
+				<figcaption><span>packages/ai/src/utils/json-parse.ts</span><span class="lines">lines 5–8</span></figcaption>
+				<pre><code class="language-typescript">function isControlCharacter(char: string): boolean {
+	const codePoint = char.codePointAt(0);
+	return codePoint !== undefined && codePoint >= 0x00 && codePoint <= 0x1f;
+}</code></pre>
+			</figure>
+			<p class="anno">
+				The signature reads like Python with the annotations made mandatory:
+				<code>def is_control_character(char: str) -&gt; bool</code>. Parameter types
+				go after a colon; the return type goes after the parentheses.
+			</p>
+			<p class="anno">
+				<code>codePointAt(0)</code> is Python's <code>ord(char)</code> — except it
+				returns <code>undefined</code> if the string is empty, so the next line
+				must check for that before comparing. TypeScript <em>forces</em> this
+				check: if you compared <code>codePoint &gt;= 0x00</code> without first
+				ruling out <code>undefined</code>, the compiler would refuse to build.
+				This is the single biggest difference from Python: entire categories of
+				<code>NoneType</code>-style bugs die at compile time.
+			</p>
+			<p class="anno">
+				And <code>!==</code>? JavaScript has a sloppy equality (<code>==</code>)
+				that coerces types, and a strict one (<code>===</code>). Well-written
+				code — including all of pi — uses the strict forms exclusively. Read
+				<code>===</code>/<code>!==</code> as Python's <code>==</code>/<code>!=</code>.
+			</p>
+		</div>
+
+		<aside class="concept" data-kind="ts">
+			<p class="concept-label">TypeScript · Static types that vanish at runtime</p>
+			<p>
+				TypeScript is JavaScript plus type annotations. The types are checked by
+				a compiler and then <strong>erased</strong> — what actually runs is plain
+				JavaScript with the annotations deleted. Python's type hints are the
+				right mental model, with one huge difference in enforcement: mypy is
+				optional and often skipped; TypeScript's checker gates the build, so
+				pi's code simply cannot ship with a type error.
+			</p>
+			<p>
+				Besides annotations, TypeScript adds ways to <em>describe shapes</em>:
+				<code>interface Point { x: number; y: number }</code> is like a
+				dataclass declaration that exists only for the checker — no class is
+				created, no memory allocated. Any object with those fields satisfies it.
+				pi's core vocabulary (Message, Tool, ToolCall) is defined this way, as
+				pure shape descriptions. You'll meet them in Module 3.
+			</p>
+		</aside>
+
+		<h2>Part 3: the main loop</h2>
+		<div class="walkthrough">
+			<figure class="code">
+				<figcaption><span>packages/ai/src/utils/json-parse.ts</span><span class="lines">lines 32–51, abridged</span></figcaption>
+				<pre><code class="language-typescript">export function repairJson(json: string): string {
+	let repaired = "";
+	let inString = false;
+
+	for (let index = 0; index < json.length; index++) {
+		const char = json[index];
+
+		if (!inString) {
+			repaired += char;
+			if (char === '"') {
+				inString = true;
+			}
+			continue;
+		}
+		// ... inside a string: escape control chars, fix bad backslashes ...
+	}</code></pre>
+			</figure>
+			<p class="anno">
+				<code>export</code> marks this function as the file's public API.
+				<code>let</code> declares a reassignable variable (contrast with
+				<code>const</code>). The classic three-part <code>for</code> loop is
+				just <code>for index in range(len(json))</code>; you'll also see the
+				cleaner <code>for (const char of json)</code>, which is Python's
+				<code>for char in json</code>.
+			</p>
+			<p class="anno">
+				The algorithm itself is a hand-rolled state machine: walk the string
+				character by character, tracking whether we're inside a JSON string
+				literal, and repair problems as they pass by. Notice how readable this
+				is — no regex golf, no dependencies. You could port it to Python in ten
+				minutes, and that feeling of "I could write this" is exactly what you
+				should calibrate to. Most production code is not clever.
+			</p>
+		</div>
+
+		<h2>Part 4: braces, semicolons, and other noise</h2>
+		<p>
+			The remaining differences are pure surface. Blocks use <code>{ }</code>
+			instead of indentation (though the code is indented anyway, so your eyes
+			can ignore the braces). Statements end with semicolons. Comments are
+			<code>//</code> and <code>/* */</code> instead of <code>#</code>, with
+			<code>/** ... */</code> "doc comments" playing the role of docstrings —
+			you saw one atop <code>repairJson</code> in the real file:
+		</p>
+		<figure class="code">
+			<figcaption><span>packages/ai/src/utils/json-parse.ts</span><span class="lines">lines 27–31</span></figcaption>
+			<pre><code class="language-typescript">/**
+ * Repairs malformed JSON string literals by:
+ * - escaping raw control characters inside strings
+ * - doubling backslashes before invalid escape characters
+ */
+export function repairJson(json: string): string {</code></pre>
+		</figure>
+
+		<h2>Your translation dictionary</h2>
+		<table>
+			<thead><tr><th>Python</th><th>TypeScript</th><th>Notes</th></tr></thead>
+			<tbody>
+				<tr><td><code>def f(x: int) -&gt; str:</code></td><td><code>function f(x: number): string {</code></td><td>one <code>number</code> type covers int + float</td></tr>
+				<tr><td><code>None</code></td><td><code>null</code> / <code>undefined</code></td><td>two flavors of nothing; "missing" is usually <code>undefined</code></td></tr>
+				<tr><td><code>dict</code></td><td><code>{ }</code> object or <code>Map</code></td><td>plain objects for records, <code>Map</code> for true dicts</td></tr>
+				<tr><td><code>list</code></td><td><code>Array</code> (<code>x: string[]</code>)</td><td><code>.push</code> = <code>.append</code>, <code>.map/.filter</code> = comprehensions</td></tr>
+				<tr><td><code>f"hi {name}"</code></td><td><code>`hi ${name}`</code></td><td>backtick "template literals"</td></tr>
+				<tr><td><code>lambda x: x + 1</code></td><td><code>(x) =&gt; x + 1</code></td><td>arrow functions; multi-line bodies allowed, unlike lambda</td></tr>
+				<tr><td><code>x == y</code></td><td><code>x === y</code></td><td>always the triple form</td></tr>
+				<tr><td><code>snake_case</code></td><td><code>camelCase</code></td><td>classes are PascalCase in both</td></tr>
+				<tr><td><code>@dataclass</code> (shape only)</td><td><code>interface</code> / <code>type</code></td><td>erased at runtime</td></tr>
+				<tr><td><code>match obj: case ...</code></td><td><code>switch (obj.type) { case ... }</code></td><td>the workhorse of this codebase — Module 2</td></tr>
+			</tbody>
+		</table>
+
+		<details class="digression">
+			<summary>Where did the "compile" step go? What's tsgo?</summary>
+			<div class="digression-body">
+				<p>
+					Classic TypeScript uses the <code>tsc</code> compiler. pi builds with
+					<code>tsgo</code>, an experimental rewrite of the TypeScript compiler
+					in Go — dramatically faster, same language. pi also restricts itself
+					to "erasable" TypeScript syntax only (no <code>enum</code>, no
+					<code>namespace</code>) so Node can run source files by merely
+					<em>stripping</em> the types, no real compilation needed. This is why
+					the repo can load user-written <code>.ts</code> extension files at
+					runtime — a trick that matters a lot in Module 8.
+				</p>
+			</div>
+		</details>
+
+		<h2>What you now know</h2>
+		<p>
+			TypeScript is Python with mandatory type hints, braces, and
+			<code>camelCase</code>. When you hit unfamiliar syntax later in the course,
+			a concept box will decode it on the spot — discriminated unions, generics,
+			<code>async</code>/<code>await</code>, and friends each get their moment.
+			Next up: the architecture that keeps 110,000 lines from collapsing into
+			spaghetti.
+		</p>
+	</article>
+	<script src="../manifest.js"></script>
+	<script src="../assets/vendor/highlight.min.js"></script>
+	<script src="../assets/js/app.js" defer></script>
+</body>
+</html>

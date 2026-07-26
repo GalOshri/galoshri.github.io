@@ -1,0 +1,93 @@
+<!doctype html>
+<html lang="en">
+<head>
+	<meta charset="utf-8">
+	<meta name="viewport" content="width=device-width, initial-scale=1">
+	<title>Anatomy of a tool definition · pi · Codebase Academy</title>
+	<link rel="stylesheet" href="../assets/css/site.css">
+</head>
+<body>
+	<article class="lesson">
+		<h1>Anatomy of a tool definition</h1>
+		<p class="lede">
+			You've now read all seven tools. This closing lesson assembles the
+			pattern they share — the full anatomy of a production tool — and
+			replays one complete tool call with every layer you've learned
+			switched on. Consider it the module's final exam, taken together.
+		</p>
+
+		<h2>The five organs</h2>
+		<p>Every tool in <code class="path">core/tools/</code> has the same anatomy:</p>
+		<figure class="diagram">
+			<div class="drow">
+				<div class="dbox"><span class="dbox-title">schema</span><span class="dbox-sub">TypeBox — model API,<br>validator, TS types</span></div>
+				<div class="dbox"><span class="dbox-title">operations</span><span class="dbox-sub">pluggable I/O interface<br>(local / SSH / sandbox)</span></div>
+				<div class="dbox accent"><span class="dbox-title">execute</span><span class="dbox-sub">the logic + truncation<br>+ onUpdate streaming</span></div>
+				<div class="dbox"><span class="dbox-title">renderers</span><span class="dbox-sub">how the call &amp; result<br>draw in the TUI</span></div>
+				<div class="dbox"><span class="dbox-title">prompt text</span><span class="dbox-sub">description, guidelines —<br>the model's manual</span></div>
+			</div>
+		</figure>
+		<p>
+			The last two organs are the ones this module hasn't dwelt on.
+			<strong>Renderers</strong>: each tool ships functions that turn its
+			calls and results into TUI components — <code>read</code> renders as a
+			path with a line range, <code>edit</code> as a colored diff,
+			<code>bash</code> as a live-scrolling output block. The tool owns its
+			pixels; the chat view just asks. <strong>Prompt text</strong>: each
+			tool contributes a snippet to the system prompt ("Available tools: …",
+			next module) plus usage guidelines. A tool is therefore documentation
+			<em>for the model</em>, UI <em>for the human</em>, and code — one
+			module, three audiences, exactly the read/details split from lesson
+			5.1 grown to full size.
+		</p>
+		<p>
+			Structurally, each file exports a <code>create&lt;Name&gt;Tool(cwd,
+			options)</code> factory (an <code>AgentTool</code> for the agent) and a
+			<code>create&lt;Name&gt;ToolDefinition</code> variant — the
+			extension-flavored wrapper that bundles the renderers and prompt text.
+			Factories, not singletons: every session gets fresh tools bound to
+			<em>its</em> working directory and <em>its</em> operations.
+		</p>
+
+		<h2>One tool call, replayed with everything on</h2>
+		<p>The model decides to fix a typo. Follow the call through every layer you now own:</p>
+		<ul>
+			<li><strong>Wire:</strong> the adapter streams <code>toolcall_start</code> / <code>toolcall_delta</code> events; partial JSON is re-parsed each delta (4.2, 4.5) — the TUI is already rendering the forming call via the tool's renderer.</li>
+			<li><strong>Grammar:</strong> <code>toolcall_end</code> delivers a parsed <code>ToolCall { name: "edit", arguments: {...} }</code> (3.4).</li>
+			<li><strong>Loop:</strong> <code>executeToolCalls</code> → prepare: tool found, <code>prepareArguments</code> unwraps the model's quirks, TypeBox validates (5.3, 3.2).</li>
+			<li><strong>Hooks:</strong> <code>beforeToolCall</code> fans out to extensions — a permission gate could veto here (6.2, 8.3).</li>
+			<li><strong>Execute:</strong> the file-mutation queue admits the edit; exact match fails, fuzzy match lands it; line endings restored; a diff is computed (6.6).</li>
+			<li><strong>Result:</strong> <code>content</code> (a terse "edited successfully" for the model) + <code>details</code> (the diff, for humans); <code>afterToolCall</code> gets the last word (5.3).</li>
+			<li><strong>Broadcast:</strong> <code>tool_execution_end</code> + a <code>ToolResultMessage</code> — the TUI paints the diff, the session file gains a line, the cost ledger ticks (2.2, 2.7, 4.6).</li>
+		</ul>
+		<p>
+			Seven lessons ago that list would have been noise. Now every clause has
+			a file behind it that you've read.
+		</p>
+
+		<div class="callout deeper">
+			<span class="callout-label">Go deeper (optional)</span>
+			<p>
+				The wrapper that fuses the two tool flavors is
+				<code class="path">core/tools/tool-definition-wrapper.ts</code>, and
+				the registry with the active/inactive logic is
+				<code class="path">core/tools/index.ts</code>. Both are short reads
+				now that you know their vocabulary.
+			</p>
+		</div>
+
+		<h2>What you now know — and the module in one sentence</h2>
+		<p>
+			A production tool is a schema, swappable I/O, budgeted execution,
+			self-rendering UI, and model-facing documentation in one factory —
+			and pi's seven tools are that pattern instantiated for looking,
+			running, and rewriting. Module 7 turns from what the agent can
+			<em>do</em> to what it can <em>remember</em>: sessions, branching,
+			compaction, and the construction of the system prompt itself.
+		</p>
+	</article>
+	<script src="../manifest.js"></script>
+	<script src="../assets/vendor/highlight.min.js"></script>
+	<script src="../assets/js/app.js" defer></script>
+</body>
+</html>

@@ -1,0 +1,134 @@
+<!doctype html>
+<html lang="en">
+<head>
+	<meta charset="utf-8">
+	<meta name="viewport" content="width=device-width, initial-scale=1">
+	<title>The paper trail · pi · Codebase Academy</title>
+	<link rel="stylesheet" href="../assets/css/site.css">
+</head>
+<body>
+	<article class="lesson">
+		<h1>The paper trail</h1>
+		<p class="lede">
+			One subscriber to the agent's broadcast hasn't had its moment yet: the
+			session logger. Everything that just happened — your question, the tool
+			call, the answer — was also written, as it happened, to a file. Close the
+			terminal, come back tomorrow, run <code>pi</code> again: the conversation
+			resumes. This lesson reads that file.
+		</p>
+
+		<h2>Where conversations live</h2>
+		<figure class="code">
+			<figcaption><span>packages/coding-agent/docs/session-format.md</span><span class="lines">file location</span></figcaption>
+			<pre><code class="language-text">~/.pi/agent/sessions/--&lt;path&gt;--/&lt;timestamp&gt;_&lt;uuid&gt;.jsonl</code></pre>
+		</figure>
+		<p>
+			One file per conversation, grouped into directories by the project you ran
+			pi in (the working directory, with slashes turned into dashes). The
+			extension is the story: <code>.jsonl</code> — <em>JSON Lines</em>.
+		</p>
+
+		<h2>Our trace, on disk</h2>
+		<p>
+			Here's what the session file for our conversation looks like —
+			reconstructed and heavily trimmed (real entries carry more fields), but
+			faithful in structure:
+		</p>
+		<figure class="code wide">
+			<figcaption><span>~/.pi/agent/sessions/…/2026-07-04…jsonl</span><span class="lines">one JSON object per line</span></figcaption>
+			<pre><code class="language-json">{"type":"session_info","version":3,"cwd":"/Users/you/my-project","id":"a1"}
+{"type":"message","id":"b2","parentId":"a1","message":{"role":"user","content":[{"type":"text","text":"what does package.json do?"}]}}
+{"type":"message","id":"c3","parentId":"b2","message":{"role":"assistant","content":[{"type":"text","text":"I'll take a look at the file."},{"type":"toolCall","id":"toolu_01XkP","name":"read","arguments":{"path":"package.json"}}],"stopReason":"toolUse","usage":{"input":4520,"output":62}}}
+{"type":"message","id":"d4","parentId":"c3","message":{"role":"toolResult","toolCallId":"toolu_01XkP","toolName":"read","content":[{"type":"text","text":"1: {\n2: \t\"name\": \"my-project\", ..."}],"isError":false}}
+{"type":"message","id":"e5","parentId":"d4","message":{"role":"assistant","content":[{"type":"text","text":"This package.json defines your project's metadata, dependencies, and npm scripts. ..."}],"stopReason":"stop","usage":{"input":5210,"output":384}}}</code></pre>
+		</figure>
+		<p>Three observations, in ascending order of cleverness:</p>
+		<ul>
+			<li>
+				<strong>It's the conversation, verbatim.</strong> The same message
+				objects you watched move through memory in lessons 2.2–2.5, serialized.
+				Resuming a session is just reading the file back into the array. Even
+				token usage is preserved — this file is also pi's cost ledger.
+			</li>
+			<li>
+				<strong>Each line is written the moment its event fires.</strong> The
+				session manager listens for <code>message_end</code> on the broadcast
+				channel and appends one line. If pi crashes mid-conversation, the file
+				is valid up to the last completed message; nothing needs recovery.
+			</li>
+			<li>
+				<strong>Every entry has an <code>id</code> and a <code>parentId</code>.</strong>
+				Why would a linear log need parent pointers? Because it isn't linear —
+				it's a <em>tree</em>. Rewind the conversation and take a different path,
+				and pi appends new entries whose <code>parentId</code> points at the
+				fork point. Old branches stay in the file; the "current" conversation
+				is whatever path leads to the active leaf. Undo, forking, and branch
+				comparison all fall out of this one field. (Module 7 explores it.)
+			</li>
+		</ul>
+
+		<aside class="concept" data-kind="eng">
+			<p class="concept-label">Engineering · JSONL and append-only logs</p>
+			<p>
+				<strong>JSON Lines</strong> — one complete JSON object per line — is
+				what you reach for when you want structure <em>and</em> the virtues of
+				a plain log: append a record with an ordinary file write, read with
+				<code>for line in file: json.loads(line)</code>, inspect with
+				<code>grep</code>, truncate safely at any newline.
+			</p>
+			<p>
+				<strong>Append-only</strong> is the deeper discipline: never rewrite
+				what's written; represent change as <em>new entries</em> (like pi's
+				fork-by-parentId). You lose the ability to "edit history" and gain
+				crash-safety, a full audit trail, and trivially correct concurrent
+				readers. Databases build their write-ahead logs this way; Git's object
+				store, Kafka, and accounting ledgers are all the same idea. When you
+				see <code>id</code>/<code>parentId</code> in a log, you're looking at
+				a persistent tree grown by appending — one of the most reusable ideas
+				you'll take from this course.
+			</p>
+		</aside>
+
+		<h2>The full journey, assembled</h2>
+		<figure class="diagram">
+			<div class="drow">
+				<div class="dbox"><span class="dbox-title">Enter</span><span class="dbox-sub">editor → onSubmit</span></div>
+				<span class="darrow">→</span>
+				<div class="dbox"><span class="dbox-title">AgentSession</span><span class="dbox-sub">.prompt(text)</span></div>
+				<span class="darrow">→</span>
+				<div class="dbox"><span class="dbox-title">Agent</span><span class="dbox-sub">string → user message</span></div>
+				<span class="darrow">→</span>
+				<div class="dbox accent"><span class="dbox-title">runLoop</span><span class="dbox-sub">turn, turn, stop</span></div>
+			</div>
+			<span class="darrow">↓ <span class="dlabel">within each turn</span></span>
+			<div class="drow">
+				<div class="dbox"><span class="dbox-title">pi-ai</span><span class="dbox-sub">context → event stream</span></div>
+				<span class="darrow">↔</span>
+				<div class="dbox"><span class="dbox-title">provider API</span><span class="dbox-sub">the actual model</span></div>
+				<span class="darrow">·</span>
+				<div class="dbox"><span class="dbox-title">tools</span><span class="dbox-sub">read package.json</span></div>
+			</div>
+			<span class="darrow">↓ <span class="dlabel">AgentEvents, broadcast</span></span>
+			<div class="drow">
+				<div class="dbox"><span class="dbox-title">TUI</span><span class="dbox-sub">differential repaint</span></div>
+				<div class="dbox"><span class="dbox-title">session .jsonl</span><span class="dbox-sub">append-only tree</span></div>
+			</div>
+			<figcaption class="dcaption">The whole trace on one card. Every module from here descends into one of these boxes.</figcaption>
+		</figure>
+
+		<h2>What you now know — and where to go</h2>
+		<p>
+			You've seen the entire life of a message: keystroke, message object, loop,
+			wire, tool, screen, disk. You also now hold the course's master diagram —
+			everything ahead is this picture at higher magnification. Module 3 starts
+			at the bottom of the dependency stack with <code>pi-ai</code>'s type
+			system: the precise shapes of Message, Tool, and the streaming events,
+			which every other layer speaks. From here on, you read real code in real
+			depth — and you're ready for it.
+		</p>
+	</article>
+	<script src="../manifest.js"></script>
+	<script src="../assets/vendor/highlight.min.js"></script>
+	<script src="../assets/js/app.js" defer></script>
+</body>
+</html>

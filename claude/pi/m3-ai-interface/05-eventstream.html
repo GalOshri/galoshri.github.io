@@ -1,0 +1,196 @@
+<!doctype html>
+<html lang="en">
+<head>
+	<meta charset="utf-8">
+	<meta name="viewport" content="width=device-width, initial-scale=1">
+	<title>EventStream: an async iterable by hand · pi · Codebase Academy</title>
+	<link rel="stylesheet" href="../assets/css/site.css">
+</head>
+<body>
+	<article class="lesson">
+		<h1>EventStream: an async iterable by hand</h1>
+		<p class="lede">
+			Between the adapter that produces events and the loop that
+			<code>for await</code>s them sits an 89-line class. It's the best small
+			file in the repository for understanding how async JavaScript actually
+			works — because it builds the machinery you normally take for granted.
+		</p>
+
+		<h2>The problem it solves</h2>
+		<p>
+			A producer (the network adapter) pushes events <em>whenever they arrive</em>.
+			A consumer (the agent loop) pulls events <em>whenever it's ready</em>.
+			Sometimes the producer is ahead (events must queue); sometimes the
+			consumer is ahead (it must sleep until something arrives). And one
+			consumer just wants the final answer, not the play-by-play. EventStream
+			handles all three with a queue, a list of waiters, and a promise.
+		</p>
+
+		<h2>The whole class, in three walkthroughs</h2>
+		<div class="walkthrough">
+			<figure class="code">
+				<figcaption><span>packages/ai/src/utils/event-stream.ts</span><span class="lines">state + constructor</span></figcaption>
+				<pre><code class="language-typescript">export class EventStream&lt;T, R = T&gt; implements AsyncIterable&lt;T&gt; {
+	private queue: T[] = [];
+	private waiting: ((value: IteratorResult&lt;T&gt;) =&gt; void)[] = [];
+	private done = false;
+	private finalResultPromise: Promise&lt;R&gt;;
+	private resolveFinalResult!: (result: R) =&gt; void;
+
+	constructor(isComplete: (event: T) =&gt; boolean, extractResult: (event: T) =&gt; R) {
+		this.isComplete = isComplete;
+		this.extractResult = extractResult;
+		this.finalResultPromise = new Promise((resolve) =&gt; {
+			this.resolveFinalResult = resolve;
+		});
+	}</code></pre>
+			</figure>
+			<p class="anno">
+				Generic over two types: <code>T</code>, the events, and <code>R</code>,
+				the final result (for assistant streams: events in,
+				<code>AssistantMessage</code> out). The state is honest bookkeeping —
+				<code>queue</code> holds events nobody has consumed;
+				<code>waiting</code> holds, in effect, <em>paused consumers</em>. The
+				constructor trick deserves a pause: it creates a Promise and
+				<em>smuggles out its resolve function</em> into a field, so the class
+				can settle the promise later, from anywhere. (The <code>!</code> tells
+				the compiler "trust me, this gets assigned" — the executor runs
+				synchronously, so it does.)
+			</p>
+			<figure class="code">
+				<figcaption><span class="lines">the producer side</span></figcaption>
+				<pre><code class="language-typescript">	push(event: T): void {
+		if (this.done) return;
+
+		if (this.isComplete(event)) {
+			this.done = true;
+			this.resolveFinalResult(this.extractResult(event));
+		}
+
+		// Deliver to waiting consumer or queue it
+		const waiter = this.waiting.shift();
+		if (waiter) {
+			waiter({ value: event, done: false });
+		} else {
+			this.queue.push(event);
+		}
+	}</code></pre>
+			</figure>
+			<p class="anno">
+				<code>push</code> is synchronous and cheap. If this event is terminal
+				(a <code>done</code>/<code>error</code>, per the <code>isComplete</code>
+				predicate), settle the final-result promise. Then the handoff: if a
+				consumer is parked in <code>waiting</code>, hand the event straight to
+				it — <em>calling a stored resolve function is how you wake a sleeping
+				async function</em>. Otherwise, queue it.
+			</p>
+			<figure class="code">
+				<figcaption><span class="lines">the consumer side</span></figcaption>
+				<pre><code class="language-typescript">	async *[Symbol.asyncIterator](): AsyncIterator&lt;T&gt; {
+		while (true) {
+			if (this.queue.length &gt; 0) {
+				yield this.queue.shift()!;
+			} else if (this.done) {
+				return;
+			} else {
+				const result = await new Promise&lt;IteratorResult&lt;T&gt;&gt;((resolve) =&gt; this.waiting.push(resolve));
+				if (result.done) return;
+				yield result.value;
+			}
+		}
+	}
+
+	result(): Promise&lt;R&gt; {
+		return this.finalResultPromise;
+	}</code></pre>
+			</figure>
+			<p class="anno">
+				Three states per lap: events queued → yield one; stream finished →
+				stop; otherwise → <em>park</em>: create a promise, push its resolve
+				function onto <code>waiting</code>, and <code>await</code>. The
+				consumer is now suspended at zero cost until <code>push</code> calls
+				that resolve. This producer/consumer handshake through stored
+				resolvers is the fundamental move of async programming — queues,
+				channels, and semaphores are all elaborations of it.
+			</p>
+		</div>
+
+		<aside class="concept" data-kind="node">
+			<p class="concept-label">Node.js · Promises under the hood</p>
+			<p>
+				A <code>Promise</code> is just a box that will hold a value later,
+				plus a list of callbacks to run when it does. <code>new Promise((resolve) =&gt; ...)</code>
+				gives <em>you</em> the trigger: whoever holds <code>resolve</code>
+				holds the power to complete the box. <code>await p</code> means
+				"suspend me; add my continuation to p's callback list." That's all —
+				no threads, no magic. Python's <code>asyncio.Future</code> with
+				<code>set_result()</code> is the same object with a different accent.
+			</p>
+			<p>
+				Two idioms from this file worth keeping: <strong>the stored
+				resolver</strong> (make a promise, keep its resolve for later — how
+				you bridge callback-world and await-world), and <strong>the shared
+				settled promise</strong> — <code>result()</code> returns the same
+				promise to every caller, and a promise that's already settled
+				delivers its value immediately to late arrivals. That's why the agent
+				loop can call <code>response.result()</code> <em>after</em> consuming
+				the whole stream and still get the final message (you saw it do
+				exactly that in lesson 2.4).
+			</p>
+		</aside>
+
+		<h2>The specialization</h2>
+		<figure class="code">
+			<figcaption><span>packages/ai/src/utils/event-stream.ts</span><span class="lines">lines 69–83</span></figcaption>
+			<pre><code class="language-typescript">export class AssistantMessageEventStream extends EventStream&lt;AssistantMessageEvent, AssistantMessage&gt; {
+	constructor() {
+		super(
+			(event) =&gt; event.type === "done" || event.type === "error",
+			(event) =&gt; {
+				if (event.type === "done") return event.message;
+				else if (event.type === "error") return event.error;
+				throw new Error("Unexpected event type for final result");
+			},
+		);
+	}
+}</code></pre>
+		</figure>
+		<p>
+			The generic machinery, bound to last lesson's grammar: complete on
+			<code>done</code> or <code>error</code>, extract the final
+			<code>AssistantMessage</code> either way. Every provider adapter returns
+			one of these; the agent layer builds its own
+			<code>EventStream&lt;AgentEvent, AgentMessage[]&gt;</code> from the same
+			class. One 89-line utility, two layers served.
+		</p>
+
+		<details class="digression">
+			<summary>Why hand-roll this instead of using an async generator?</summary>
+			<div class="digression-body">
+				<p>
+					An <code>async function*</code> is <em>pull-driven</em>: its body
+					only advances when a consumer asks for the next value. But a network
+					socket pushes data on its own schedule, whether or not anyone is
+					pulling, and pi also needs the side-channel <code>result()</code>
+					promise and multi-phase completion semantics. A hand-rolled
+					push-queue gives producer and consumer each their own tempo, with
+					the class as shock absorber. (Python folks: this is
+					<code>asyncio.Queue</code> grown a result future.)
+				</p>
+			</div>
+		</details>
+
+		<h2>What you now know</h2>
+		<p>
+			An async iterable is not magic: it's a queue, a list of parked resolvers,
+			and the discipline to wake exactly one sleeper per event. You now
+			understand every mechanism behind <code>for await (const event of
+			response)</code>. One lesson left in this module: the wrapper that
+			guarantees these streams <em>never throw</em>.
+		</p>
+	</article>
+	<script src="../manifest.js"></script>
+	<script src="../assets/vendor/highlight.min.js"></script>
+	<script src="../assets/js/app.js" defer></script>
+</body>
+</html>

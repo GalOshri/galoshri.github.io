@@ -1,0 +1,158 @@
+<!doctype html>
+<html lang="en">
+<head>
+	<meta charset="utf-8">
+	<meta name="viewport" content="width=device-width, initial-scale=1">
+	<title>edit, write, and fuzzy matching · pi · Codebase Academy</title>
+	<link rel="stylesheet" href="../assets/css/site.css">
+</head>
+<body>
+	<article class="lesson">
+		<h1>edit, write, and fuzzy matching</h1>
+		<p class="lede">
+			How does a language model edit a file it can't see the bytes of? pi's
+			answer — search-and-replace with carefully bounded forgiveness — lives
+			in <code>edit-diff.ts</code>, home of the most instructive algorithm in
+			the repository.
+		</p>
+
+		<h2>The edit contract</h2>
+		<p>
+			The <code>edit</code> tool's schema: a <code>path</code> plus an array
+			of <code>{ oldText, newText }</code> pairs. The model quotes a snippet
+			it believes is in the file, and supplies the replacement. Three rules
+			give the contract its safety:
+		</p>
+		<ul>
+			<li><strong>Each <code>oldText</code> must be found</strong> — or the whole edit fails with a teaching error: <em>"Could not find the exact text in … The old text must match exactly including all whitespace and newlines."</em> (Error messages addressed to a model are prompts; this one trains it to quote more carefully.)</li>
+			<li><strong>Each match must be unique</strong> — <em>"Found 3 occurrences … Please provide more context to make it unique."</em> Ambiguity never silently picks a winner.</li>
+			<li><strong>All edits match against the original file</strong>, not the output of earlier edits in the batch — so the model can't confuse itself about intermediate states.</li>
+		</ul>
+
+		<h2>The problem: models misquote invisibly</h2>
+		<p>
+			The model saw the file through <code>read</code>, possibly turns ago,
+			filtered through tokenization. When it quotes <code>oldText</code>
+			back, tiny corruptions creep in: a trailing space dropped, an en-dash
+			where the file has a hyphen, curly quotes for straight ones. Exact
+			<code>indexOf</code> would fail on differences no human can even see.
+			pi's answer is a <em>two-tier</em> match:
+		</p>
+		<figure class="code">
+			<figcaption><span>packages/coding-agent/src/core/tools/edit-diff.ts</span><span class="lines">fuzzyFindText, abridged</span></figcaption>
+			<pre><code class="language-typescript">export function fuzzyFindText(content: string, oldText: string): FuzzyMatchResult {
+	// Try exact match first
+	const exactIndex = content.indexOf(oldText);
+	if (exactIndex !== -1) {
+		return { found: true, index: exactIndex, matchLength: oldText.length, usedFuzzyMatch: false, contentForReplacement: content };
+	}
+
+	// Try fuzzy match - work entirely in normalized space
+	const fuzzyContent = normalizeForFuzzyMatch(content);
+	const fuzzyOldText = normalizeForFuzzyMatch(oldText);
+	const fuzzyIndex = fuzzyContent.indexOf(fuzzyOldText);
+
+	if (fuzzyIndex === -1) {
+		return { found: false, /* ... */ };
+	}
+	return { found: true, index: fuzzyIndex, matchLength: fuzzyOldText.length, usedFuzzyMatch: true, contentForReplacement: fuzzyContent };
+}</code></pre>
+		</figure>
+		<p>And the normalization — a curated list of exactly the corruptions models actually produce:</p>
+		<figure class="code">
+			<figcaption><span>packages/coding-agent/src/core/tools/edit-diff.ts</span><span class="lines">normalizeForFuzzyMatch, verbatim</span></figcaption>
+			<pre><code class="language-typescript">export function normalizeForFuzzyMatch(text: string): string {
+	return (
+		text
+			.normalize("NFKC")
+			// Strip trailing whitespace per line
+			.split("\n")
+			.map((line) =&gt; line.trimEnd())
+			.join("\n")
+			// Smart single quotes → '
+			.replace(/[‘’‚‛]/g, "'")
+			// Smart double quotes → "
+			.replace(/[“”„‟]/g, '"')
+			// Various dashes/hyphens → -
+			// U+2010 hyphen, U+2011 non-breaking hyphen, U+2012 figure dash,
+			// U+2013 en-dash, U+2014 em-dash, U+2015 horizontal bar, U+2212 minus
+			.replace(/[‐‑‒–—―−]/g, "-")
+			// Special spaces → regular space
+			// U+00A0 NBSP, U+2002-U+200A various spaces, U+202F narrow NBSP,
+			// U+205F medium math space, U+3000 ideographic space
+			.replace(/[  -   　]/g, " ")
+	);
+}</code></pre>
+		</figure>
+
+		<aside class="concept" data-kind="eng">
+			<p class="concept-label">Engineering · Unicode normalization, or "identical" strings that aren't</p>
+			<p>
+				Unicode lets the same visible text have different byte encodings:
+				<code>é</code> as one codepoint or as <code>e</code> + a combining
+				accent; a dozen kinds of dash; six kinds of invisible space.
+				<code>"café" === "café"</code> can be false. The standard fix is a
+				<em>normalization form</em> — <code>NFKC</code> maps compatibility
+				variants (fullwidth letters, ligatures, composed accents) to one
+				canonical encoding. Python has it too:
+				<code>unicodedata.normalize("NFKC", s)</code>.
+			</p>
+			<p>
+				The design insight here isn't the API, it's the <em>restraint</em>:
+				normalize only what's cosmetically invisible (quotes, dashes,
+				trailing spaces), never anything meaningful (indentation, case,
+				actual words) — and do the search <em>entirely in normalized
+				space</em> for both haystack and needle, so offsets stay coherent.
+				Fuzzy matching that's too fuzzy would silently edit the wrong code,
+				which is catastrophically worse than failing. Bounded forgiveness.
+			</p>
+		</aside>
+
+		<p>
+			Around the match, the file logic preserves what the model never sees:
+			CRLF vs LF line endings detected and restored, a UTF-8 BOM stripped and
+			re-attached (<code>stripBom</code>), and a unified diff produced for
+			the UI — the pretty red/green block you see after every edit is
+			computed here, not by git.
+		</p>
+
+		<h2>write, and the mutation queue</h2>
+		<p>
+			<code>write</code> is comparatively boring — create/overwrite a file
+			with content — with one shared subtlety: both mutating tools wrap
+			their work in <code>withFileMutationQueue</code>, which serializes
+			operations <em>per file path</em>. Remember that tool calls run in
+			parallel by default (lesson 5.3); two edits to the same file racing
+			each other would corrupt it. A per-path promise queue means edits to
+			<em>different</em> files still overlap while same-file operations
+			line up. Concurrency control scoped exactly to the actual hazard —
+			nothing global, nothing coarse.
+		</p>
+
+		<div class="callout note">
+			<span class="callout-label">Note · why not just regenerate the whole file?</span>
+			<p>
+				Early agents did "write the full new version" — simple, and it burns
+				output tokens proportional to file size (expensive, lesson 4.6),
+				risks the model silently dropping code it forgot, and makes diffs
+				unreviewable. Targeted search-replace edits cost tokens proportional
+				to the <em>change</em>, fail loudly when the model's memory of the
+				file is stale, and produce human-auditable diffs. Every serious
+				coding agent converged on some version of this design.
+			</p>
+		</div>
+
+		<h2>What you now know</h2>
+		<p>
+			edit = quote-and-replace with uniqueness enforcement, two-tier matching
+			whose fuzziness is a hand-curated list of invisible corruptions, and
+			byte-level courtesy (line endings, BOM) — all serialized per file
+			against parallel tools. One lesson left in the module: zooming out to
+			see what a tool definition <em>is</em>, now that you've read them all.
+		</p>
+	</article>
+	<script src="../manifest.js"></script>
+	<script src="../assets/vendor/highlight.min.js"></script>
+	<script src="../assets/js/app.js" defer></script>
+</body>
+</html>

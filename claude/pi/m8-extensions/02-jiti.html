@@ -1,0 +1,138 @@
+<!doctype html>
+<html lang="en">
+<head>
+	<meta charset="utf-8">
+	<meta name="viewport" content="width=device-width, initial-scale=1">
+	<title>Running TypeScript at runtime · pi · Codebase Academy</title>
+	<link rel="stylesheet" href="../assets/css/site.css">
+</head>
+<body>
+	<article class="lesson">
+		<h1>Running TypeScript at runtime</h1>
+		<p class="lede">
+			Extensions are <code>.ts</code> files, and TypeScript famously needs
+			compiling. Yet pi loads them instantly, with imports that resolve to
+			packages the user never installed. Two tricks make it work — a
+			type-stripping loader and virtual modules — and both repay
+			understanding.
+		</p>
+
+		<h2>Trick one: jiti, the just-in-time loader</h2>
+		<figure class="code">
+			<figcaption><span>packages/coding-agent/src/core/extensions/loader.ts</span><span class="lines">loadExtensionModule, abridged</span></figcaption>
+			<pre><code class="language-typescript">import { createJiti } from "jiti/static";
+
+async function loadExtensionModule(extensionPath: string, cacheToken?: ExtensionCacheToken) {
+	// ...consult the in-memory cache (invalidated by /reload)...
+
+	const jiti = createJiti(import.meta.url, {
+		moduleCache: false,
+		// In Bun binary: use virtualModules for bundled packages (no filesystem resolution)
+		// Also disable tryNative so jiti handles ALL imports (not just the entry point)
+		// In Node.js/dev: use aliases to resolve to node_modules paths
+		...(isBunBinary ? { virtualModules: VIRTUAL_MODULES, tryNative: false } : { alias: getAliases() }),
+	});
+
+	const module = await jiti.import(extensionPath, { default: true });
+	const factory = module as ExtensionFactory;
+	if (typeof factory !== "function") {
+		return undefined;
+	}
+	return factory;
+}</code></pre>
+		</figure>
+		<p>
+			<strong>jiti</strong> is a library that imports TypeScript by
+			transforming it on the fly — and here's where lesson 1.3's digression
+			pays off: because pi's world restricts itself to <em>erasable</em>
+			TypeScript (no enums, no namespaces — syntax that can simply be
+			deleted), "transforming" is barely more than stripping the type
+			annotations. No type <em>checking</em> happens at load time; types in
+			extension files are for the author's editor. The runtime just wants
+			the JavaScript underneath.
+		</p>
+
+		<aside class="concept" data-kind="node">
+			<p class="concept-label">Node.js · Runtime module loading, vs importlib</p>
+			<p>
+				Python people feel at home here: <code>importlib.import_module()</code>
+				on a user's plugin file is a Tuesday. In compiled-language
+				ecosystems it's exotic; JavaScript sits in between — dynamic
+				<code>import()</code> of JS is native, but loading <em>another
+				language</em> (TypeScript) requires a custom loader like jiti that
+				hooks module resolution, transforms source, and evaluates it.
+			</p>
+			<p>
+				The knobs in the excerpt are the classic plugin-loader concerns,
+				worth recognizing anywhere: <strong>cache control</strong>
+				(<code>moduleCache: false</code> + pi's own cache with a
+				generation token — so <code>/reload</code> actually reloads,
+				defeating the module system's usual "import once" memoization;
+				Python's <code>importlib.reload</code> scars apply), and
+				<strong>resolution control</strong> — deciding what
+				<code>import "x"</code> <em>means</em> inside a plugin. Which is
+				trick two.
+			</p>
+		</aside>
+
+		<h2>Trick two: the imports that shouldn't work</h2>
+		<p>
+			hello.ts began with
+			<code>import { Type } from "@earendil-works/pi-ai"</code> — but the
+			user writing that file in some random project never ran
+			<code>npm install @earendil-works/pi-ai</code>. Resolution would fail…
+			except pi intercepts it:
+		</p>
+		<ul>
+			<li>
+				<strong>Dev/Node installs:</strong> an <code>alias</code> map points
+				the pi package names at pi's <em>own</em> copies in its
+				node_modules — extensions share the exact classes the host runs,
+				so an <code>instanceof</code> or a TypeBox schema built in an
+				extension is genuinely compatible.
+			</li>
+			<li>
+				<strong>Compiled binary installs:</strong> pi also ships as a
+				single-file Bun executable with no node_modules at all. There,
+				<code>VIRTUAL_MODULES</code> maps the import names to modules
+				bundled <em>inside the binary</em> — imports resolved from memory,
+				no filesystem involved.
+			</li>
+		</ul>
+		<p>
+			Net effect: every extension gets a standard library — pi-ai's types,
+			pi-tui's components, the agent core — "for free," and pi controls
+			exactly which APIs that is. The import line in an extension is not a
+			dependency declaration; it's a <em>capability grant</em> that happens
+			to look like one. (Extensions needing genuinely external npm packages
+			get a real package.json — the <code>with-deps</code> example — but the
+			common case needs nothing.)
+		</p>
+
+		<h2>Why no build step is a feature, not laziness</h2>
+		<p>
+			The payoff compounds: edit <code>.pi/extensions/foo.ts</code>, type
+			<code>/reload</code>, changed behavior — a seconds-long feedback loop.
+			And one more consequence, the self-extensibility punchline: since the
+			agent can <code>write</code> files (6.6), and extensions are just
+			files, and the system prompt tells the model where the extension docs
+			and examples live (7.4) — <em>you can ask pi to write its own
+			extensions</em>, then <code>/reload</code> to activate them. Every
+			piece of that loop is machinery you've now read; "self-extensible
+			coding agent" turns out to be a precise technical claim, not
+			marketing.
+		</p>
+
+		<h2>What you now know</h2>
+		<p>
+			Runtime TS = erasable-syntax discipline + a stripping loader + owned
+			resolution (aliases or in-binary virtual modules) + deliberate cache
+			busting. Next lesson we stop reading machinery and read three real
+			extensions — the fastest way to internalize what the API feels like.
+		</p>
+	</article>
+	<script src="../manifest.js"></script>
+	<script src="../assets/vendor/highlight.min.js"></script>
+	<script src="../assets/js/app.js" defer></script>
+</body>
+</html>

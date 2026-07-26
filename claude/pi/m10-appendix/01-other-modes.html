@@ -1,0 +1,109 @@
+<!doctype html>
+<html lang="en">
+<head>
+	<meta charset="utf-8">
+	<meta name="viewport" content="width=device-width, initial-scale=1">
+	<title>The other modes: print, JSON, RPC · pi · Codebase Academy</title>
+	<link rel="stylesheet" href="../assets/css/site.css">
+</head>
+<body>
+	<article class="lesson">
+		<h1>The other modes: print, JSON, RPC</h1>
+		<p class="lede">
+			Strip away the TUI and what's left? Everything, it turns out. The
+			appendix begins with pi's three headless faces — culminating in RPC
+			mode, where pi stops being a program you use and becomes a component
+			other programs use.
+		</p>
+
+		<h2>print and json: pi as a Unix filter</h2>
+		<p>
+			<code>pi -p "summarize the failing tests"</code> runs one full agent
+			session — loop, tools, everything — prints the final answer, exits.
+			Pipe-friendly (lesson 6.1's TTY detection makes this automatic), so it
+			slots into shell scripts, git hooks, and cron jobs: the agent as a
+			160-line mode (<code class="path">modes/print-mode.ts</code>) over the
+			same engine. <code>--mode json</code> is the same run, but emitting
+			<em>every event</em> as a JSON line — the whole
+			<code>AgentEvent</code> broadcast (2.2), serialized. Anything that can
+			read lines can now watch an agent think.
+		</p>
+
+		<h2>RPC: the agent as a subprocess</h2>
+		<p>
+			RPC mode inverts the relationship: pi runs as a long-lived child
+			process, <em>commands</em> arrive as JSON lines on stdin, and
+			responses/events flow back on stdout. The command vocabulary is a
+			discriminated union — of course it is — and reading it is a tour of
+			everything you've learned, exposed as remote control:
+		</p>
+		<figure class="code wide">
+			<figcaption><span>packages/coding-agent/src/modes/rpc/rpc-types.ts</span><span class="lines">RpcCommand, abridged</span></figcaption>
+			<pre><code class="language-typescript">export type RpcCommand =
+	// Prompting
+	| { id?: string; type: "prompt"; message: string; images?: ImageContent[]; streamingBehavior?: "steer" | "followUp" }
+	| { id?: string; type: "steer"; message: string }
+	| { id?: string; type: "abort" }
+	// Model & thinking
+	| { id?: string; type: "set_model"; provider: string; modelId: string }
+	| { id?: string; type: "set_thinking_level"; level: ThinkingLevel }
+	// Compaction & retry
+	| { id?: string; type: "compact"; customInstructions?: string }
+	| { id?: string; type: "set_auto_retry"; enabled: boolean }
+	// Bash & session
+	| { id?: string; type: "bash"; command: string; excludeFromContext?: boolean }
+	| { id?: string; type: "fork"; entryId: string }
+	| { id?: string; type: "get_tree" }
+	| { id?: string; type: "get_messages" }
+	// ...~30 commands total</code></pre>
+		</figure>
+		<p>
+			Every command maps to an <code>AgentSession</code> method you already
+			know — <code>steer</code> to the queue from 5.4, <code>fork</code> to
+			the tree from 7.2, <code>compact</code> to 7.3. The optional
+			<code>id</code> lets a caller match responses to requests over the
+			shared pipe (concurrent commands in flight), and session
+			<em>events</em> stream unsolicited between responses — the same
+			broadcast, one more subscriber. Protocol design 101, and you've seen
+			every ingredient: JSONL framing (2.7), discriminated unions (2.2),
+			request/response correlation ids.
+		</p>
+
+		<h2>Why this matters more than it looks</h2>
+		<p>
+			RPC mode is what makes pi <em>infrastructure</em>. An IDE plugin, a CI
+			bot, a web frontend, a test harness — anything that can spawn a
+			process and speak line-JSON gets a full coding agent with sessions,
+			tools, and extensions, no TypeScript required (a Python driver is a
+			dozen lines of <code>subprocess</code> + <code>json</code>).
+			It's also the enabler for the next lesson: if one pi can be driven
+			through a pipe, <em>many</em> pis can be driven by a supervisor.
+			The mode dispatch you met in lesson 6.1 turns out to be the
+			load-bearing wall of pi's whole ecosystem strategy.
+		</p>
+
+		<div class="callout deeper">
+			<span class="callout-label">Go deeper (optional)</span>
+			<p>
+				The full protocol — responses, event framing, lifecycle — is
+				documented in <code class="path">packages/coding-agent/docs/rpc.md</code>,
+				with the implementation in
+				<code class="path">src/modes/rpc/rpc-mode.ts</code> (~800 lines) and a
+				ready-made client class in <code class="path">rpc-client.ts</code>.
+			</p>
+		</div>
+
+		<h2>What you now know</h2>
+		<p>
+			One engine, four faces: TUI for humans, print for pipes, json for
+			observers, RPC for machines — each just a different subscriber to the
+			same event broadcast, the payoff of a decision made back in lesson
+			2.2. Next: the experimental package that herds fleets of these
+			subprocesses.
+		</p>
+	</article>
+	<script src="../manifest.js"></script>
+	<script src="../assets/vendor/highlight.min.js"></script>
+	<script src="../assets/js/app.js" defer></script>
+</body>
+</html>

@@ -1,0 +1,408 @@
+<!doctype html>
+<html lang="en">
+<head>
+	<meta charset="utf-8">
+	<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+	<meta name="color-scheme" content="light dark">
+	<title>State, Config &amp; Extension · Codex Explainer</title>
+	<link rel="stylesheet" href="assets/css/site.css">
+</head>
+<body>
+	<article class="lesson" data-module="m11-state-config.html">
+		<h1>State, Config &amp; Extension</h1>
+		<p class="lede">
+			Everything so far described a single run. This module is about what survives
+			between runs — configuration, conversations, project knowledge — and about the
+			five separate mechanisms Codex provides for changing its behaviour without
+			touching its source.
+		</p>
+
+		<section class="lesson-section" id="config" data-minutes="9">
+			<h2>config: layers, profiles, overrides</h2>
+
+			<p>
+				Configuration is not a file. It is a stack of layers, each knowing where it came
+				from:
+			</p>
+
+			<figure class="code">
+				<figcaption><span>codex-rs/config/src/config_layer_source.rs</span><span class="lines">lines 4–26</span></figcaption>
+				<pre><code class="language-rust">/// Provenance for one layer in the effective Codex configuration.
+pub enum ConfigLayerSource {
+    /// Managed preferences delivered by MDM.
+    Mdm { domain: String, key: String },
+    /// Host-wide configuration loaded from a file.
+    System { file: AbsolutePathBuf },
+    /// Configuration delivered by an enterprise cloud bundle.
+    EnterpriseManaged { id: String, name: String },
+    /// User configuration, optionally augmented by a selected profile.
+    User {
+        file: AbsolutePathBuf,
+        profile: Option&lt;String&gt;,
+    },
+    /// Configuration loaded from a project's `.codex` directory.
+    Project { dot_codex_folder: AbsolutePathBuf },
+    /// Overrides supplied for the current session.
+    SessionFlags,
+    /// Legacy managed configuration loaded from a file.
+    LegacyManagedConfigTomlFromFile { file: AbsolutePathBuf },
+    /// Legacy managed configuration delivered by MDM.
+    LegacyManagedConfigTomlFromMdm,
+}</code></pre>
+			</figure>
+
+			<p>And precedence is an explicit number, not an implicit ordering:</p>
+
+			<figure class="code">
+				<figcaption><span>codex-rs/config/src/config_layer_source.rs</span><span class="lines">lines 28–48</span></figcaption>
+				<pre><code class="language-rust">/// A setting from a layer with a higher precedence overrides a setting
+/// from a layer with a lower precedence.
+pub fn precedence(&amp;self) -&gt; i16 {
+    match self {
+        ConfigLayerSource::Mdm { .. } =&gt; 0,
+        ConfigLayerSource::System { .. } =&gt; 10,
+        ConfigLayerSource::EnterpriseManaged { .. } =&gt; 15,
+        ConfigLayerSource::User { profile, .. } =&gt; {
+            if profile.is_some() { 21 } else { 20 }
+        }
+        ConfigLayerSource::Project { .. } =&gt; 25,
+        ConfigLayerSource::SessionFlags =&gt; 30,
+        ConfigLayerSource::LegacyManagedConfigTomlFromFile { .. } =&gt; 40,
+        ConfigLayerSource::LegacyManagedConfigTomlFromMdm =&gt; 50,
+    }
+}</code></pre>
+			</figure>
+
+			<p>
+				Read it bottom-up from 0: MDM is the <em>base</em>, then system, then enterprise
+				bundle, then your <code>config.toml</code>, then your selected profile, then the
+				project's <code>.codex</code> folder, then flags you typed. Nearer the user
+				wins. The two legacy layers at 40 and 50 sit above everything — deliberate
+				compatibility scaffolding so an older managed-config mechanism keeps overriding
+				as it always did.
+			</p>
+
+			<p>
+				The gap between 20 and 21 is the neatest detail here: a profile is not a separate
+				kind of layer, it is your own config at one point higher precedence, so
+				<code>--profile work</code> overrides your defaults and nothing else changes.
+			</p>
+
+			<aside class="concept" data-kind="eng">
+				<p class="concept-label">Engineering · Keep the provenance</p>
+				<p>
+					The naive approach merges everything into one struct at startup and forgets
+					where each value came from. Then "why is my model setting being ignored?"
+					becomes unanswerable. Codex keeps each layer as a <code>ConfigLayer</code>
+					with its <code>name</code>, <code>version</code>, and even a
+					<code>disabled_reason</code> — which is why
+					<code class="path">codex-rs/config/src/diagnostics.rs</code> and the
+					<code>codex doctor</code> subcommand can tell you exactly which file won.
+				</p>
+			</aside>
+
+			<p>
+				Because config is layered and typed, it is also schema-generated. Remember
+				<code>AGENTS.md</code>: <em>"If you change <code>ConfigToml</code> or nested
+				config types, run <code>just write-config-schema</code>"</em> — producing
+				<code class="path">codex-rs/core/config.schema.json</code>, the authoritative
+				list of every setting.
+			</p>
+		</section>
+
+		<section class="lesson-section" id="rollouts" data-minutes="9">
+			<h2>Rollouts: how conversations persist</h2>
+
+			<p>
+				A <strong>rollout</strong> is the on-disk record of a thread. Module&nbsp;3
+				established that events go to your screen and to a file at the same time; this
+				is that file, and the crate around it is bigger than you would expect:
+			</p>
+
+			<div class="table-wrap">
+				<table>
+					<thead>
+						<tr><th>Module in <code>rollout/</code></th><th>Problem</th></tr>
+					</thead>
+					<tbody>
+						<tr><td><code>recorder.rs</code></td><td>Append events as they happen</td></tr>
+						<tr><td><code>reverse_jsonl_scanner.rs</code></td><td>Read a JSONL file <em>backwards</em></td></tr>
+						<tr><td><code>compression.rs</code></td><td>Old rollouts get large</td></tr>
+						<tr><td><code>session_index.rs</code>, <code>rollout_reference_index.rs</code></td><td>Find a conversation without reading every file</td></tr>
+						<tr><td><code>search.rs</code>, <code>list.rs</code></td><td>Back the <code>codex resume</code> picker</td></tr>
+						<tr><td><code>state_db.rs</code>, <code>sqlite_metrics.rs</code></td><td>An SQLite index alongside the files</td></tr>
+						<tr><td><code>policy.rs</code></td><td>What to keep, what to discard</td></tr>
+					</tbody>
+				</table>
+			</div>
+
+			<aside class="concept" data-kind="eng">
+				<p class="concept-label">Engineering · Why append-only, and why read backwards</p>
+				<p>
+					Appending one JSON object per line is crash-safe by construction: a process
+					killed mid-write loses at most the last line, and everything before it is
+					still valid. Nothing is ever rewritten, so there is no window where the file
+					is inconsistent. The cost is that the <em>most interesting</em> information —
+					how the conversation ended, what it was about — is at the far end. Hence
+					<code>reverse_jsonl_scanner.rs</code>: to list your recent sessions, read each
+					file backwards and stop early, rather than parsing megabytes to reach the
+					last line.
+				</p>
+			</aside>
+
+			<p>
+				Module&nbsp;5's <code>InitialHistory</code> is the other end of this. Resuming
+				replays a rollout into a new thread; forking replays it and diverges. Both are
+				ordinary thread construction with a non-empty starting history, which is why
+				<code>resume</code>, <code>fork</code>, <code>archive</code>,
+				<code>unarchive</code>, and <code>delete</code> could all appear in
+				Module&nbsp;1's subcommand list without any of them being a special case.
+			</p>
+
+			<p>
+				<code class="path">codex-rs/rollout-trace</code> is a separate 13,000-line crate
+				for replaying a recorded session — the <code>replay_bundle</code> and
+				<code>REDUCED_STATE_FILE_NAME</code> imports you saw in
+				<code class="path">codex-rs/cli/src/main.rs</code> back in Module&nbsp;1. A bug
+				report can ship as a bundle that reproduces the exact sequence of events.
+			</p>
+		</section>
+
+		<section class="lesson-section" id="agents-md" data-minutes="8">
+			<h2>AGENTS.md and project context</h2>
+
+			<p>
+				Codex reads instructions from your repository. The algorithm is documented at the
+				top of the file that implements it:
+			</p>
+
+			<figure class="code">
+				<figcaption><span>codex-rs/core/src/agents_md.rs</span><span class="lines">module doc comment</span></figcaption>
+				<pre><code class="language-rust">//! AGENTS.md discovery and user instruction assembly.
+//!
+//! 1.  Determine the project root by walking upwards from the current working
+//!     directory until a configured `project_root_markers` entry is found.
+//!     When `project_root_markers` is unset, the default marker list is used
+//!     (`.git`). If no marker is found, only the current working directory is
+//!     considered. An empty marker list disables parent traversal.
+//! 2.  Collect every `AGENTS.md` found from the project root down to the
+//!     current working directory (inclusive) and concatenate their contents in
+//!     that order.
+//! 3.  We do **not** walk past the project root.</code></pre>
+			</figure>
+
+			<p>
+				Every <code>AGENTS.md</code> between the project root and where you are, in
+				order, concatenated — so a monorepo can have a general file at the top and a
+				specific one in each package. Rule 3 is the safety property: Codex will not
+				climb into your home directory and pick up instructions from an unrelated
+				project.
+			</p>
+
+			<p>
+				This is why <code>tui/src/bottom_pane/AGENTS.md</code> exists as its own file in
+				Module&nbsp;9. Work in that directory and you get the general rules plus the
+				composer-specific ones.
+			</p>
+
+			<figure class="code">
+				<figcaption><span>codex-rs/core/src/agents_md.rs</span><span class="lines">the constants</span></figcaption>
+				<pre><code class="language-rust">/// Default filename scanned for AGENTS.md instructions.
+pub const DEFAULT_AGENTS_MD_FILENAME: &amp;str = "AGENTS.md";
+/// Preferred local override for AGENTS.md instructions.
+pub const LOCAL_AGENTS_MD_FILENAME: &amp;str = "AGENTS.override.md";
+
+/// When both user and project AGENTS.md docs are present, they will be
+/// joined with this separator.
+const AGENTS_MD_SEPARATOR: &amp;str = "\n\n--- project-doc ---\n\n";
+
+const MAX_CONCURRENT_ANCESTOR_PROBES: usize = 256;</code></pre>
+			</figure>
+
+			<p>
+				<code>AGENTS.override.md</code> is for personal instructions you do not want to
+				commit. And <code>MAX_CONCURRENT_ANCESTOR_PROBES</code> is a reminder of the
+				scale this runs at: directory probing is done concurrently, bounded, because on
+				a network filesystem an unbounded fan-out would be its own outage.
+			</p>
+
+			<aside class="concept" data-kind="llm">
+				<p class="concept-label">LLM · Instructions are still just context</p>
+				<p>
+					Everything assembled here is prepended to the conversation as text. It costs
+					tokens on every request, competes for the model's attention with your actual
+					question, and — as Module&nbsp;8 warned — is not privileged over anything
+					else the model reads. A 500-line <code>AGENTS.md</code> is not five times
+					better than a 100-line one; it is five times more expensive and probably less
+					well followed.
+				</p>
+			</aside>
+		</section>
+
+		<section class="lesson-section" id="skills" data-minutes="7">
+			<h2>Skills and prompts</h2>
+
+			<p>
+				<code class="path">codex-rs/prompts/templates/</code> is worth browsing whole: it
+				is every instruction Codex gives a model, as plain Markdown, embedded with
+				<code>include_str!</code>. You have already read two —
+				<code>compact/prompt.md</code> in Module&nbsp;5 and
+				<code>apply_patch_tool_instructions.md</code> in Module&nbsp;7. Others cover
+				review rubrics, goal tracking, and realtime sessions.
+			</p>
+
+			<p>
+				<strong>Skills</strong> are the user-supplied version of the same idea:
+				reusable, named instructions Codex can load on demand, with their own crates
+				(<code class="path">codex-rs/skills</code>,
+				<code class="path">codex-rs/core-skills</code>). Because a skill can depend on
+				an MCP server being available, there is a
+				<code class="path">codex-rs/core/src/mcp_skill_dependencies.rs</code> to resolve
+				that.
+			</p>
+
+			<p>
+				The design constraint is the same one behind <code>tool_search</code> in
+				Module&nbsp;7: instructions loaded eagerly cost tokens forever, so skills are
+				discovered and injected only when relevant.
+			</p>
+		</section>
+
+		<section class="lesson-section" id="hooks-plugins" data-minutes="9">
+			<h2>Hooks and plugins</h2>
+
+			<p>
+				Two different extension mechanisms, and the difference matters.
+			</p>
+
+			<p>
+				<strong>Hooks</strong> are callbacks at defined lifecycle points. The crate's
+				structure shows the shape — <code>declarations.rs</code>,
+				<code>registry.rs</code>, <code>config_rules.rs</code>, an
+				<code>events/</code> directory and an <code>engine/</code> directory. You met
+				them in Module&nbsp;5 wrapping compaction
+				(<code>run_pre_compact_hooks</code>, <code>run_post_compact_hooks</code>), and
+				in Module&nbsp;3 as <code>run_hooks_and_record_inputs</code> inside the turn
+				loop. Module&nbsp;7's <code>post_tool_use_payload</code> on the tool trait is a
+				hook point too.
+			</p>
+
+			<figure class="code">
+				<figcaption><span class="lines">codex-rs/hooks/src/</span></figcaption>
+				<pre><code class="language-plaintext">declarations.rs   registry.rs
+config_rules.rs   legacy_notify.rs
+output_spill.rs   engine/   events/   bin/</code></pre>
+			</figure>
+
+			<p>
+				<code>output_spill.rs</code> is a good detail: a hook is often an external
+				program, and an external program can print more than you want in your context
+				window, so its output has to be capped and spilled. Extension points are only
+				safe if they are bounded.
+			</p>
+
+			<p>
+				<strong>Plugins</strong> are heavier: <code class="path">codex-rs/plugin</code>,
+				<code class="path">codex-rs/core-plugins</code> (~36,000 lines — the fourth
+				largest crate in the repo), and <code class="path">codex-rs/ext</code> with
+				sub-crates including <code>extension-api</code>, <code>agent</code>,
+				<code>connectors</code>, <code>goal</code>, <code>guardian</code>,
+				<code>image-generation</code>, <code>items</code>, and <code>memories</code>.
+			</p>
+
+			<p>
+				This is where Module&nbsp;4's <code>TurnItem::Extension</code> pays off — the
+				variant whose <em>"schema and lifecycle details are owned by an extension"</em>.
+				A plugin can introduce a new kind of item that core stores, persists to the
+				rollout, and forwards to clients without understanding it. That is a real
+				extension point rather than a callback.
+			</p>
+
+			<p>
+				Module&nbsp;7's <code>request_plugin_install</code> and
+				<code>list_available_plugins_to_install</code> tools close the loop: the model
+				can notice it lacks a capability and ask to install it. Together with
+				<code>codex plugin</code> and <code>codex marketplace</code> from the CLI, this
+				is a distribution system, not just an API.
+			</p>
+
+			<aside class="concept" data-kind="eng">
+				<p class="concept-label">Engineering · Five ways to extend, on purpose</p>
+				<p>
+					Config changes settings. <code>AGENTS.md</code> adds instructions. Skills add
+					reusable instructions on demand. MCP adds tools from other programs. Hooks
+					run code at lifecycle points. Plugins add items, tools, and behaviour. That
+					looks like duplication, but each targets a different <em>author</em> — a
+					user, a repository, a team, a tool vendor, an ops engineer, a developer — and
+					collapsing them would force everyone up to the most powerful and most
+					dangerous mechanism.
+				</p>
+			</aside>
+		</section>
+
+		<section class="lesson-section" id="memories-telemetry" data-minutes="8">
+			<h2>Memories, telemetry, analytics</h2>
+
+			<p>
+				<strong>Memories</strong> (<code class="path">codex-rs/memories</code>,
+				<code>ext/memories</code>, <code>core/src/memory_usage.rs</code>,
+				<code>protocol/src/memory_citation.rs</code>) let facts persist across threads —
+				not just within one conversation. The <code>memory_citation</code> type is the
+				honest part: when a memory influences an answer, it can be cited, so you can see
+				<em>why</em> Codex believed something. Module&nbsp;6's
+				<code>summarize_memories</code> on <code>ModelClient</code> is where they get
+				condensed.
+			</p>
+
+			<p>
+				<strong>Telemetry</strong> splits in two, and the split is deliberate.
+				<code class="path">codex-rs/otel</code> is OpenTelemetry — traces and spans for
+				debugging, the <code>.instrument(trace_span!(...))</code> calls threaded through
+				Module&nbsp;3's turn loop and the <code>W3cTraceContext</code> on
+				<code>Submission</code> in Module&nbsp;4. It answers "what happened in this
+				request, and where did the time go?"
+			</p>
+
+			<p>
+				<code class="path">codex-rs/analytics</code> is product measurement, and
+				Module&nbsp;5 showed how granular it gets — six separate enums describing a
+				single compaction. It answers "is this feature making things better or worse
+				across everyone?"
+			</p>
+
+			<div class="callout note">
+				<span class="callout-label">Note</span>
+				<p>
+					<code class="path">codex-rs/response-debug-context</code> and
+					<code>core/src/prompt_debug.rs</code> are the tools for the question you will
+					eventually have: <em>what exactly did the model receive?</em> After
+					Module&nbsp;5's context manager, compaction, injected skills, and assembled
+					<code>AGENTS.md</code>, the answer is genuinely hard to reconstruct by
+					reading code. Both exist because the authors needed them.
+				</p>
+			</div>
+
+			<h3>What you now know</h3>
+
+			<p>
+				Config is a precedence-ordered stack of layers that remembers where each value
+				came from, with profiles as a one-point bump over your own defaults. Rollouts
+				are append-only JSONL, read backwards for speed, indexed in SQLite, and replayed
+				to resume or fork. <code>AGENTS.md</code> is concatenated from the project root
+				down and never above it. Prompts and skills are Markdown, loaded lazily because
+				context is scarce. Hooks are bounded lifecycle callbacks; plugins can introduce
+				item types core does not understand. And Codex measures itself twice — traces
+				for debugging one request, analytics for judging a feature.
+			</p>
+
+			<p>
+				One module left: the whole crate map, how to run this yourself, and where to go
+				next.
+			</p>
+		</section>
+	</article>
+	<script src="manifest.js"></script>
+	<script src="assets/vendor/highlight.min.js"></script>
+	<script src="assets/js/app.js" defer></script>
+</body>
+</html>

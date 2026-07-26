@@ -1,0 +1,369 @@
+<!doctype html>
+<html lang="en">
+<head>
+	<meta charset="utf-8">
+	<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+	<meta name="color-scheme" content="light dark">
+	<title>Appendix — The Whole Map · Codex Explainer</title>
+	<link rel="stylesheet" href="assets/css/site.css">
+</head>
+<body>
+	<article class="lesson" data-module="m12-appendix.html">
+		<h1>Appendix — The Whole Map</h1>
+		<p class="lede">
+			A reference you can come back to: every crate in the workspace with a one-line
+			description and the module that covers it, the commands to build and debug Codex
+			locally, and some honest suggestions about what to do next.
+		</p>
+
+		<section class="lesson-section" id="crate-map" data-minutes="10">
+			<h2>The complete crate map</h2>
+
+			<p>
+				Line counts exclude integration-test directories, and are there to show you
+				where the weight is, not as a quality measure. Scroll the table sideways on a
+				phone.
+			</p>
+
+			<h3>The spine</h3>
+
+			<div class="table-wrap">
+				<table>
+					<thead>
+						<tr><th>Crate</th><th>Lines</th><th>What it does</th><th>Module</th></tr>
+					</thead>
+					<tbody>
+						<tr><td><code>tui</code></td><td>199,958</td><td>The terminal interface</td><td>9</td></tr>
+						<tr><td><code>core</code></td><td>179,553</td><td>The agent: threads, turns, tools, model client</td><td>3, 5, 6, 7</td></tr>
+						<tr><td><code>app-server</code></td><td>44,308</td><td>JSON-RPC daemon every front door goes through</td><td>10</td></tr>
+						<tr><td><code>core-plugins</code></td><td>35,647</td><td>Built-in plugins layered onto core</td><td>11</td></tr>
+						<tr><td><code>app-server-protocol</code></td><td>29,407</td><td>Types of the JSON-RPC dialect</td><td>4</td></tr>
+						<tr><td><code>exec-server</code></td><td>27,939</td><td>Separate process that executes commands</td><td>8</td></tr>
+						<tr><td><code>protocol</code></td><td>22,105</td><td>The shared vocabulary: Op, Event, TurnItem</td><td>4</td></tr>
+						<tr><td><code>config</code></td><td>21,083</td><td>Layered configuration with provenance</td><td>11</td></tr>
+						<tr><td><code>cli</code></td><td>21,008</td><td>Argument parsing and subcommand dispatch</td><td>1, 3</td></tr>
+					</tbody>
+				</table>
+			</div>
+
+			<h3>Sandboxing and execution</h3>
+
+			<div class="table-wrap">
+				<table>
+					<thead>
+						<tr><th>Crate</th><th>Lines</th><th>What it does</th></tr>
+					</thead>
+					<tbody>
+						<tr><td><code>windows-sandbox-rs</code></td><td>19,139</td><td>Windows restricted-token sandbox</td></tr>
+						<tr><td><code>network-proxy</code></td><td>16,304</td><td>Proxying and policing outbound traffic</td></tr>
+						<tr><td><code>linux-sandbox</code></td><td>6,863</td><td>The self-invoked Linux helper</td></tr>
+						<tr><td><code>shell-command</code></td><td>6,760</td><td>Parsing and describing shell commands</td></tr>
+						<tr><td><code>sandboxing</code></td><td>6,301</td><td>Platform selection, Seatbelt/Landlock/bwrap policies</td></tr>
+						<tr><td><code>apply-patch</code></td><td>4,553</td><td>The patch format, parser, and applier</td></tr>
+						<tr><td><code>execpolicy</code></td><td>1,974</td><td>Policy language judging command lines</td></tr>
+						<tr><td><code>exec-server-protocol</code></td><td>1,672</td><td>Types for the exec server</td></tr>
+						<tr><td><code>shell-escalation</code></td><td>2,279</td><td>Requesting more permission mid-turn</td></tr>
+						<tr><td><code>process-hardening</code></td><td>193</td><td>Process-level defensive settings</td></tr>
+						<tr><td><code>bwrap</code></td><td>151</td><td>Bubblewrap invocation</td></tr>
+					</tbody>
+				</table>
+			</div>
+
+			<h3>State and persistence</h3>
+
+			<div class="table-wrap">
+				<table>
+					<thead>
+						<tr><th>Crate</th><th>Lines</th><th>What it does</th></tr>
+					</thead>
+					<tbody>
+						<tr><td><code>state</code></td><td>18,634</td><td>Durable process/session state</td></tr>
+						<tr><td><code>thread-store</code></td><td>18,449</td><td>Storing and querying threads</td></tr>
+						<tr><td><code>rollout</code></td><td>13,876</td><td>Append-only conversation records</td></tr>
+						<tr><td><code>rollout-trace</code></td><td>13,070</td><td>Replaying a recorded session</td></tr>
+						<tr><td><code>memories</code></td><td>4,771</td><td>Facts that persist across threads</td></tr>
+						<tr><td><code>message-history</code></td><td>1,437</td><td>Composer history for the TUI</td></tr>
+						<tr><td><code>agent-graph-store</code></td><td>479</td><td>Relationships between agents</td></tr>
+						<tr><td><code>codex-home</code></td><td>227</td><td>Locating <code>~/.codex</code></td></tr>
+					</tbody>
+				</table>
+			</div>
+
+			<h3>Model, API, and auth</h3>
+
+			<div class="table-wrap">
+				<table>
+					<thead>
+						<tr><th>Crate</th><th>Lines</th><th>What it does</th></tr>
+					</thead>
+					<tbody>
+						<tr><td><code>codex-api</code></td><td>12,468</td><td>Response events and API surface types</td></tr>
+						<tr><td><code>login</code></td><td>10,820</td><td>OAuth flows and credential management</td></tr>
+						<tr><td><code>http-client</code></td><td>6,724</td><td>Shared HTTP layer</td></tr>
+						<tr><td><code>model-provider</code></td><td>3,247</td><td>Talking to a provider</td></tr>
+						<tr><td><code>models-manager</code></td><td>2,664</td><td>Which models exist and their capabilities</td></tr>
+						<tr><td><code>backend-client</code></td><td>2,241</td><td>OpenAI backend services</td></tr>
+						<tr><td><code>websocket-client</code></td><td>1,158</td><td>WebSocket transport for Responses</td></tr>
+						<tr><td><code>model-provider-info</code></td><td>1,118</td><td>Provider descriptions, <code>WireApi</code></td></tr>
+						<tr><td><code>responses-api-proxy</code></td><td>1,007</td><td>Guarded model access for child processes</td></tr>
+						<tr><td><code>chatgpt</code></td><td>917</td><td>ChatGPT-specific endpoints, <code>codex apply</code></td></tr>
+						<tr><td><code>ollama</code>, <code>lmstudio</code></td><td>891 / 470</td><td>Local model runtimes</td></tr>
+						<tr><td><code>aws-auth</code></td><td>375</td><td>AWS credential signing</td></tr>
+						<tr><td><code>keyring-store</code></td><td>226</td><td>OS keychain storage</td></tr>
+						<tr><td><code>secrets</code></td><td>786</td><td>Handling secret values</td></tr>
+					</tbody>
+				</table>
+			</div>
+
+			<h3>Front doors and integration</h3>
+
+			<div class="table-wrap">
+				<table>
+					<thead>
+						<tr><th>Crate</th><th>Lines</th><th>What it does</th></tr>
+					</thead>
+					<tbody>
+						<tr><td><code>ext</code></td><td>18,278</td><td>Extension API and bundled extensions</td></tr>
+						<tr><td><code>app-server-transport</code></td><td>14,460</td><td>Framing over stdio, sockets, in-process</td></tr>
+						<tr><td><code>external-agent-migration</code></td><td>13,375</td><td>Importing config from other agents</td></tr>
+						<tr><td><code>codex-mcp</code></td><td>12,801</td><td>MCP connection management</td></tr>
+						<tr><td><code>code-mode</code></td><td>12,000</td><td>Model writes scripts that call tools</td></tr>
+						<tr><td><code>hooks</code></td><td>11,775</td><td>Lifecycle callbacks</td></tr>
+						<tr><td><code>rmcp-client</code></td><td>10,793</td><td>Codex as an MCP client</td></tr>
+						<tr><td><code>core-skills</code></td><td>9,971</td><td>Built-in skills</td></tr>
+						<tr><td><code>exec</code></td><td>5,530</td><td><code>codex exec</code> non-interactive mode</td></tr>
+						<tr><td><code>cloud-tasks</code></td><td>5,129</td><td>Codex Cloud task browser</td></tr>
+						<tr><td><code>connectors</code></td><td>4,851</td><td>External service connectors</td></tr>
+						<tr><td><code>mcp-server</code></td><td>2,505</td><td>Codex as an MCP server</td></tr>
+						<tr><td><code>app-server-client</code></td><td>3,413</td><td><code>InProcess</code> / <code>Remote</code> client</td></tr>
+						<tr><td><code>app-server-daemon</code></td><td>3,552</td><td>Daemon lifecycle</td></tr>
+						<tr><td><code>code-mode-host</code>, <code>code-mode-protocol</code></td><td>2,239 / 3,553</td><td>Code-mode runtime and types</td></tr>
+						<tr><td><code>cloud-config</code>, <code>cloud-tasks-client</code></td><td>2,427 / 1,117</td><td>Cloud configuration and API</td></tr>
+						<tr><td><code>plugin</code>, <code>skills</code></td><td>873 / 372</td><td>Plugin and skill definitions</td></tr>
+						<tr><td><code>uds</code>, <code>stdio-to-uds</code></td><td>452 / 66</td><td>Unix domain sockets and a stdio shim</td></tr>
+					</tbody>
+				</table>
+			</div>
+
+			<h3>Support and utilities</h3>
+
+			<div class="table-wrap">
+				<table>
+					<thead>
+						<tr><th>Crate</th><th>Lines</th><th>What it does</th></tr>
+					</thead>
+					<tbody>
+						<tr><td><code>utils</code></td><td>15,210</td><td>Many small crates: paths, CLI, templates, fuzzy match</td></tr>
+						<tr><td><code>analytics</code></td><td>11,607</td><td>Product measurement</td></tr>
+						<tr><td><code>otel</code></td><td>4,048</td><td>OpenTelemetry traces</td></tr>
+						<tr><td><code>git-utils</code></td><td>3,572</td><td>Git operations</td></tr>
+						<tr><td><code>features</code></td><td>2,584</td><td>Feature flags and stages</td></tr>
+						<tr><td><code>prompts</code></td><td>1,708</td><td>Markdown prompt templates</td></tr>
+						<tr><td><code>terminal-detection</code></td><td>1,495</td><td>Which terminal are we in</td></tr>
+						<tr><td><code>file-watcher</code>, <code>file-search</code>, <code>file-system</code></td><td>1,492 / 1,312 / 816</td><td>Filesystem watching, search, abstraction</td></tr>
+						<tr><td><code>feedback</code></td><td>1,137</td><td>In-product feedback</td></tr>
+						<tr><td><code>agent-identity</code>, <code>install-context</code></td><td>1,000 / 615</td><td>Who and where this install is</td></tr>
+						<tr><td><code>arg0</code></td><td>751</td><td>The arg0 dispatch trick</td></tr>
+						<tr><td><code>context-fragments</code></td><td>231</td><td>Client-supplied context</td></tr>
+						<tr><td><code>response-debug-context</code></td><td>166</td><td>What did the model actually receive</td></tr>
+						<tr><td><code>ansi-escape</code>, <code>async-utils</code></td><td>58 / 86</td><td>Small shared helpers</td></tr>
+						<tr><td><code>v8-poc</code>, <code>thread-manager-sample</code></td><td>92 / 420</td><td>Experiments and samples</td></tr>
+					</tbody>
+				</table>
+			</div>
+		</section>
+
+		<section class="lesson-section" id="building" data-minutes="9">
+			<h2>Building, running, and debugging</h2>
+
+			<p>
+				Everything is driven by <code>just</code>, a task runner. The
+				<code>justfile</code> sets its working directory to <code>codex-rs</code>, so
+				you can run these from anywhere in the repo:
+			</p>
+
+			<figure class="code">
+				<figcaption><span>justfile</span><span class="lines">selected recipes</span></figcaption>
+				<pre><code class="language-makefile"># `codex`
+alias c := codex
+codex *args:
+    cargo run --bin codex -- {args}
+
+# `codex exec`
+exec *args:
+    cargo run --bin codex -- exec {args}
+
+# Format the justfile, Rust, Bazel/Starlark, Python SDK code, and Python scripts.
+fmt:
+    @{{ python }} ../scripts/format.py
+
+# Check formatting without modifying files.
+fmt-check:
+    @{{ python }} ../scripts/format.py --check
+
+fix *args:
+    cargo clippy --fix --tests --allow-dirty {args}
+
+clippy *args:
+    cargo clippy --tests {args}</code></pre>
+			</figure>
+
+			<p>
+				So <code>just c "explain this repo"</code> builds and runs Codex from source.
+				<code>just clippy</code> runs the linter with the rules from Module&nbsp;1.
+				<code>just fmt</code> formats everything, in four languages, through one Python
+				script.
+			</p>
+
+			<aside class="concept" data-kind="rust">
+				<p class="concept-label">Rust · The build you should expect</p>
+				<p>
+					A cold <code>cargo build</code> of 126 crates and 1.2M lines takes a long
+					time and a lot of RAM. Incremental builds after that are fast, because Cargo
+					only rebuilds crates whose dependencies changed — which is the payoff for all
+					that crate-splitting ceremony from Module&nbsp;1. If you only want to poke at
+					one crate, <code>cargo build -p codex-execpolicy</code> builds it and its
+					dependencies alone.
+				</p>
+			</aside>
+
+			<p>Some other recipes worth knowing:</p>
+
+			<figure class="code">
+				<figcaption><span>justfile</span><span class="lines">more recipes</span></figcaption>
+				<pre><code class="language-makefile"># Run the CLI version of the file-search crate.
+file-search *args:
+    cargo run --bin codex-file-search -- {args}
+
+# Build the CLI and run the app-server test client
+app-server-test-client *args:
+    cargo build -p codex-cli
+    cargo run -p codex-app-server-test-client -- --codex-bin ./target/debug/codex {args}
+
+[unix]
+install:
+    rustup show active-toolchain
+    cargo fetch</code></pre>
+			</figure>
+
+			<p>
+				<code>just app-server-test-client</code> is the one to reach for if you want to
+				see the protocol from Module&nbsp;10 with your own eyes: it builds a real binary
+				and drives it as a client, printing the JSON-RPC traffic.
+			</p>
+
+			<h3>When you need to know what the model saw</h3>
+
+			<p>
+				After Module&nbsp;5's context manager, Module&nbsp;11's assembled
+				<code>AGENTS.md</code>, injected skills, and compaction, reconstructing the
+				actual prompt by reading code is impractical. Use the tools built for it:
+				<code class="path">codex-rs/core/src/prompt_debug.rs</code> and
+				<code class="path">codex-rs/response-debug-context</code>. There is also
+				<code>codex doctor</code> for config and auth problems — it can tell you which
+				config layer won, which is exactly what the provenance design in
+				Module&nbsp;11 is for.
+			</p>
+
+			<div class="callout warn">
+				<span class="callout-label">Careful</span>
+				<p>
+					Running Codex from source runs a real agent with real credentials against
+					your real filesystem. Start it in a scratch directory, and consider
+					<code>--ask-for-approval untrusted</code> while you are experimenting. The
+					sandbox is good, but Module&nbsp;8's whole point is that it is the last line,
+					not the first.
+				</p>
+			</div>
+		</section>
+
+		<section class="lesson-section" id="where-next" data-minutes="8">
+			<h2>Where to go from here</h2>
+
+			<p>
+				You now have a map of a codebase most people bounce off. Some suggestions,
+				roughly in order of effort.
+			</p>
+
+			<p>
+				<strong>Read one file completely.</strong> Not skim — read.
+				<code class="path">codex-rs/core/src/safety.rs</code> is the best candidate:
+				about 200 lines, no dependencies you haven't met, and it is the security
+				decision at the heart of the product. You have already seen most of it across
+				Modules 2, 3, and 8.
+			</p>
+
+			<p>
+				<strong>Follow one feature end to end.</strong> Pick something small you can see
+				in the UI — the token counter, say. Find <code>TokenCountEvent</code> in
+				<code>protocol</code>, then who emits it in <code>core</code>, then who renders
+				it in <code>tui</code>. Tracing one thread through all three layers teaches more
+				than reading any single crate.
+			</p>
+
+			<p>
+				<strong>Run it against itself.</strong> Codex is developed using Codex. Point it
+				at this repository and ask it to explain a crate you skipped —
+				<code>code-mode</code>, or <code>exec-server</code>. You now know enough to
+				check whether the answer is true, which is the only way that exercise is worth
+				anything.
+			</p>
+
+			<p>
+				<strong>Write a tool.</strong> Module&nbsp;7 gave you the anatomy:
+				a <code>*_spec.rs</code> declaring the schema, a handler implementing
+				<code>CoreToolRuntime</code>, registration, tests. It is the smallest change
+				that touches the model, the protocol, the sandbox, and the UI at once.
+			</p>
+
+			<aside class="concept" data-kind="eng">
+				<p class="concept-label">Engineering · What this codebase is actually teaching</p>
+				<p>
+					The agent loop is about 200 lines. Everything else — 1.2 million lines — is
+					the answer to "what if this has to work for millions of people, on three
+					operating systems, against an untrusted model, without losing their data or
+					wrecking their machine?" If you take one thing from this course, take the
+					ratio. Building an agent is easy. The distance between that and Codex is
+					sandboxing, protocols, persistence, telemetry, extension points, and
+					compatibility — and that distance is the actual job.
+				</p>
+			</aside>
+
+			<h3>A caveat about freshness</h3>
+
+			<p>
+				This course was written against one commit, named in the footer of every page.
+				<code>openai/codex</code> moves fast: files get split, crates get renamed,
+				<code>WireApi</code> may sprout a second variant. The <em>architecture</em> here
+				should stay recognisable far longer than any individual line number.
+			</p>
+
+			<p>
+				When something no longer matches, the techniques still work. Read the
+				<code>Cargo.toml</code> before the source. List public items before reading
+				bodies. Ignore <code>_tests.rs</code> on the first pass. Read the doc comments —
+				in this codebase they are the architecture document, because there isn't one.
+				And trust the enums: in a codebase this disciplined about making illegal states
+				unrepresentable, the type definitions tell you what is true.
+			</p>
+
+			<h3>What you now know</h3>
+
+			<p>
+				All of it, roughly: what Codex is and its four front doors; enough Rust to read
+				any of it; one message traced end to end; the protocol crate that everything
+				speaks; the session, turn loop, and context manager; the model client and its
+				streaming; the tools and the patch format; the three sandboxes and the safety
+				decision; the terminal UI; the app-server hub, MCP in both directions, and two
+				SDKs; and how config, rollouts, skills, hooks, and plugins persist and extend
+				it.
+			</p>
+
+			<p>Go read the source.</p>
+		</section>
+	</article>
+	<script src="manifest.js"></script>
+	<script src="assets/vendor/highlight.min.js"></script>
+	<script src="assets/js/app.js" defer></script>
+</body>
+</html>

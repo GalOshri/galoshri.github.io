@@ -1,0 +1,184 @@
+<!doctype html>
+<html lang="en">
+<head>
+	<meta charset="utf-8">
+	<meta name="viewport" content="width=device-width, initial-scale=1">
+	<title>How the project keeps itself honest · pi · Codebase Academy</title>
+	<link rel="stylesheet" href="../assets/css/site.css">
+</head>
+<body>
+	<article class="lesson">
+		<h1>How the project keeps itself honest</h1>
+		<p class="lede">
+			Big codebases don't stay coherent because everyone is careful. They stay
+			coherent because machines refuse incoherent code. This lesson tours pi's
+			enforcement machinery — and its most unusual artifact: a rulebook written
+			for AI contributors.
+		</p>
+
+		<h2>The gate: <code>npm run check</code></h2>
+		<p>
+			One command must pass before any commit lands. Here it is from the root
+			manifest, and it's worth reading slowly because it's a whole philosophy in
+			one line:
+		</p>
+		<figure class="code">
+			<figcaption><span>package.json</span><span class="lines">root scripts, abridged</span></figcaption>
+			<pre><code class="language-json">{
+	"check": "biome check --write --error-on-warnings .
+	          && npm run check:pinned-deps
+	          && npm run check:ts-imports
+	          && npm run check:shrinkwrap
+	          && tsgo --noEmit
+	          && npm run check:browser-smoke"
+}</code></pre>
+		</figure>
+		<p>Left to right (each <code>&amp;&amp;</code> means "and only if that succeeded"):</p>
+		<ul>
+			<li>
+				<strong>biome</strong> — a combined formatter and linter (one fast tool
+				replacing the traditional ESLint + Prettier pair; think
+				<code>ruff format</code> + <code>ruff check</code> fused together).
+				<code>--write</code> autofixes what it can; <code>--error-on-warnings</code>
+				means warnings are failures. There is no "we'll clean it up later" tier.
+			</li>
+			<li>
+				<strong>check:pinned-deps</strong> — a custom script asserting every
+				external dependency is pinned to an exact version. More below.
+			</li>
+			<li>
+				<strong>check:ts-imports</strong> — enforces the house style that
+				relative imports spell out the <code>.ts</code> extension.
+			</li>
+			<li>
+				<strong>tsgo --noEmit</strong> — the TypeScript compiler in
+				check-only mode: type-check all ~110k lines, emit nothing. The
+				<code>mypy --strict</code> of the operation, except non-negotiable.
+			</li>
+		</ul>
+		<p>
+			A <strong>husky</strong> pre-commit hook (a small tool that installs Git
+			hooks from the repo) runs this entire pipeline automatically before every
+			commit. You physically cannot commit unformatted or type-broken code from
+			a normal setup.
+		</p>
+
+		<h2>Paranoia as policy: dependencies</h2>
+		<p>
+			The most distinctive part of pi's tooling has nothing to do with types.
+			The project treats every third-party package as a potential attack. From
+			the rulebook:
+		</p>
+		<figure class="code">
+			<figcaption><span>AGENTS.md</span><span class="lines">Dependency and Install Security</span></figcaption>
+			<pre><code class="language-text">- Treat npm dep and lockfile changes as reviewed code. Direct external
+  deps stay pinned to exact versions.
+- Hydrate/update locally with `npm install --ignore-scripts`; ...
+  Don't run lifecycle scripts unless the user asks.
+- New deps with lifecycle scripts require review and an explicit
+  allowlist entry ...; never add one silently.
+- Pre-commit blocks lockfile commits unless PI_ALLOW_LOCKFILE_CHANGE=1.</code></pre>
+		</figure>
+
+		<aside class="concept" data-kind="eng">
+			<p class="concept-label">Engineering · Supply-chain attacks and lockfiles</p>
+			<p>
+				When you install a dependency, you're running someone else's code on
+				your machine — and npm packages can register <em>lifecycle scripts</em>
+				that execute arbitrary commands <em>at install time</em>. Compromise one
+				popular package (or one maintainer's laptop) and you compromise everyone
+				who installs it. This is a supply-chain attack, and npm has suffered
+				several famous ones; Python's PyPI has too.
+			</p>
+			<p>
+				pi's defenses, in order: <strong>exact version pins</strong> (a range
+				like <code>^7.0.0</code> would silently adopt whatever <code>7.0.1</code>
+				turns out to be; <code>7.0.5</code> adopts nothing), a
+				<strong>lockfile</strong> recording the hash of every package in the
+				whole tree (like <code>uv.lock</code>), <strong>--ignore-scripts</strong>
+				on every install so lifecycle scripts never run, and an
+				<strong>allowlist</strong> for the rare dependency that genuinely needs
+				one. Notice these are <em>process</em> defenses, enforced by scripts and
+				hooks — not vigilance.
+			</p>
+		</aside>
+
+		<h2>Tests</h2>
+		<p>
+			About 294 test files sit in per-package <code>test/</code> directories —
+			the coding agent alone has 161. The repo's honest wrinkle: two test
+			runners. Three packages use <strong>vitest</strong> (a pytest-like runner);
+			<code>pi-tui</code> uses Node's built-in <code>node --test</code>. Real
+			projects accrete history like this. Two details worth stealing:
+		</p>
+		<ul>
+			<li>
+				Tests that would hit paid LLM APIs activate <em>only</em> when auth
+				environment variables are present; the default <code>./test.sh</code>
+				run costs nothing and touches no network. Agent tests run against the
+				scripted <em>faux provider</em> instead (Module 4).
+			</li>
+			<li>
+				The TUI test directory is full of files with names like
+				<code>bug-regression-…-cjk-width.test.ts</code>: each past bug froze
+				into a permanent test. That's what "the codebase remembers" looks like.
+			</li>
+		</ul>
+
+		<h2>AGENTS.md: a constitution for humans and machines</h2>
+		<p>
+			The repository's most 2020s artifact is a Markdown file of development
+			rules at the root — addressed simultaneously to human contributors and to
+			<em>AI agents working on the code</em>, including pi itself (pi reads it
+			automatically when run inside this repo; Module 7 shows the mechanism).
+			A taste of its flavor:
+		</p>
+		<figure class="code">
+			<figcaption><span>AGENTS.md</span><span class="lines">selected rules</span></figcaption>
+			<pre><code class="language-text">- No `any` unless absolutely necessary.
+- Inline single-line helpers that have only one call site.
+- Check node_modules for external API types; don't guess.
+- Never hardcode key checks (e.g. matchesKey(keyData, "ctrl+x")). Add
+  defaults to DEFAULT_EDITOR_KEYBINDINGS ... so they stay configurable.
+
+## Git
+Multiple pi sessions may be running in this cwd at the same time, each
+modifying different files. Git operations that touch ... files outside
+your own changes will stomp on other sessions' work.
+- Only commit files YOU changed in THIS session.
+- Stage explicit paths (`git add <path1> <path2>`); never `git add -A`.</code></pre>
+		</figure>
+		<p>
+			Read that Git section again: it exists because the maintainers routinely
+			have <em>several AI agents editing the repository concurrently</em>, and the
+			rules keep them from trampling each other. The project doesn't just build
+			an agent — it's developed <em>by</em> agents, under written law. (<code>any</code>,
+			by the way, is TypeScript's escape hatch meaning "stop type-checking this
+			value" — banning it keeps the safety net intact everywhere.)
+		</p>
+
+		<div class="callout note">
+			<span class="callout-label">Note · why this matters for reading code</span>
+			<p>
+				Enforcement tooling is why you can trust patterns while reading. When
+				every file is identically formatted, every import is real (unused ones
+				are lint errors), and every type annotation is verified, the code you
+				read <em>means what it says</em>. In looser codebases, half the skill is
+				guessing which comments and types are lies; here that tax is near zero.
+			</p>
+		</div>
+
+		<h2>What you now know</h2>
+		<p>
+			pi stays coherent through a single non-negotiable gate (format + lint +
+			custom checks + types), paranoid dependency hygiene, regression-hoarding
+			tests, and a written constitution that both people and machines obey.
+			One short lesson remains in this module: how to get the most out of the
+			course itself.
+		</p>
+	</article>
+	<script src="../manifest.js"></script>
+	<script src="../assets/vendor/highlight.min.js"></script>
+	<script src="../assets/js/app.js" defer></script>
+</body>
+</html>

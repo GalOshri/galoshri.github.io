@@ -1,0 +1,130 @@
+<!doctype html>
+<html lang="en">
+<head>
+	<meta charset="utf-8">
+	<meta name="viewport" content="width=device-width, initial-scale=1">
+	<title>The extension system · pi · Codebase Academy</title>
+	<link rel="stylesheet" href="../assets/css/site.css">
+</head>
+<body>
+	<article class="lesson">
+		<h1>The extension system</h1>
+		<p class="lede">
+			pi calls itself "self-extensible": drop a TypeScript file in
+			<code>.pi/extensions/</code> and it runs inside the agent with access
+			to nearly everything — no build step, no plugin SDK to install. This
+			lesson maps the machinery; the simplest possible extension is our
+			specimen.
+		</p>
+
+		<h2>An extension is a function</h2>
+		<figure class="code">
+			<figcaption><span>examples/extensions/hello.ts</span><span class="lines">verbatim, whole file</span></figcaption>
+			<pre><code class="language-typescript">import { Type } from "@earendil-works/pi-ai";
+import { defineTool, type ExtensionAPI } from "@earendil-works/pi-coding-agent";
+
+const helloTool = defineTool({
+	name: "hello",
+	label: "Hello",
+	description: "A simple greeting tool",
+	parameters: Type.Object({
+		name: Type.String({ description: "Name to greet" }),
+	}),
+
+	async execute(_toolCallId, params, _signal, _onUpdate, _ctx) {
+		return {
+			content: [{ type: "text", text: `Hello, ${params.name}!` }],
+			details: { greeted: params.name },
+		};
+	},
+});
+
+export default function (pi: ExtensionAPI) {
+	pi.registerTool(helloTool);
+}</code></pre>
+		</figure>
+		<p>
+			Read with Module-trained eyes, there's nothing new here: a TypeBox
+			schema (3.2), an <code>execute</code> with the AgentTool signature —
+			signal, onUpdate, content/details split (5.1) — and a default-exported
+			<strong>factory function</strong> that receives the API object and
+			registers things. That's the entire plugin contract:
+			<code>ExtensionFactory = (pi: ExtensionAPI) =&gt; void | Promise&lt;void&gt;</code>.
+			Twenty lines, and the model gains a tool that renders in the TUI and
+			participates in the full lesson-6.7 lifecycle.
+		</p>
+
+		<h2>The API surface: five verbs</h2>
+		<p><code>ExtensionAPI</code> (defined in <code class="path">core/extensions/types.ts</code>, ~400 lines of the file) groups into:</p>
+		<table>
+			<thead><tr><th>Group</th><th>Members</th><th>Power granted</th></tr></thead>
+			<tbody>
+				<tr><td><strong>observe</strong></td><td><code>pi.on(event, handler)</code> — ~30 typed events</td><td>watch everything: session lifecycle, turns, messages, tool calls, provider requests, user input</td></tr>
+				<tr><td><strong>intervene</strong></td><td>return values from handlers</td><td>block tool calls, rewrite results, replace the system prompt, transform context</td></tr>
+				<tr><td><strong>add capability</strong></td><td><code>registerTool</code>, <code>registerCommand</code>, <code>registerShortcut</code>, <code>registerFlag</code></td><td>new tools, slash commands, keybindings, CLI flags</td></tr>
+				<tr><td><strong>act</strong></td><td><code>sendMessage</code>, <code>exec</code>, <code>setModel</code>, <code>setActiveTools</code>, <code>appendEntry</code></td><td>drive the agent: inject messages (steer/followUp — lesson 5.4's queues!), run processes, switch models</td></tr>
+				<tr><td><strong>replace infrastructure</strong></td><td><code>registerProvider</code>, <code>registerMessageRenderer</code>, custom compaction</td><td>swap the model backend or the UI rendering itself</td></tr>
+			</tbody>
+		</table>
+		<p>
+			The event map will feel familiar — <code>agent_start</code>,
+			<code>turn_end</code>, <code>tool_call</code>,
+			<code>before_provider_request</code>… — because you've seen where each
+			one comes from. The extension <em>runner</em>
+			(<code class="path">core/extensions/runner.ts</code>) is the adapter
+			between this registration surface and the hooks you've already read:
+			it installs itself into <code>agent.beforeToolCall</code> /
+			<code>afterToolCall</code> (5.3), <code>transformContext</code> and
+			<code>onPayload</code> (6.2), and the AgentSession broadcast (2.2) —
+			then fans each occurrence out to every subscribed extension, chaining
+			their results. <strong>Extensions are loop hooks with a plugin
+			manager.</strong> No new theory required; that's why this module is
+			short.
+		</p>
+
+		<h2>Trust: the price of this power</h2>
+		<p>
+			An extension runs with pi's full process rights — your files, your
+			environment variables, your credentials. Hence the trust gate from
+			lesson 6.1: the first time you run pi in a directory, it asks whether
+			to trust it; <em>until then, project-local extensions do not load</em>.
+			The threat is concrete — <code>git clone something && pi</code> must
+			not execute the something's code. Note the design's honesty: trust is
+			binary and coarse (this directory: yes/no), not a permissions matrix
+			pretending to sandbox TypeScript. If you need real confinement, the
+			containerization docs (and Gondolin/sandbox example extensions) put
+			the whole agent in a box instead.
+		</p>
+
+		<figure class="diagram">
+			<div class="drow">
+				<div class="dbox"><span class="dbox-title">.pi/extensions/*.ts</span><span class="dbox-sub">project (trust-gated)</span></div>
+				<div class="dbox"><span class="dbox-title">~/.pi/agent/extensions/</span><span class="dbox-sub">global, yours</span></div>
+				<div class="dbox"><span class="dbox-title">--extensions flag</span><span class="dbox-sub">explicit</span></div>
+			</div>
+			<span class="darrow">↓ loaded by jiti (next lesson) → factory(pi) runs</span>
+			<div class="drow">
+				<div class="dbox accent"><span class="dbox-title">ExtensionRunner</span><span class="dbox-sub">fan-out · result chaining · error isolation</span></div>
+			</div>
+			<span class="darrow">↓ installs into</span>
+			<div class="drow">
+				<div class="dbox"><span class="dbox-title">Agent hooks</span><span class="dbox-sub">before/afterToolCall, transformContext</span></div>
+				<div class="dbox"><span class="dbox-title">event broadcast</span><span class="dbox-sub">AgentSession</span></div>
+				<div class="dbox"><span class="dbox-title">TUI &amp; commands</span><span class="dbox-sub">renderers, slash, keys</span></div>
+			</div>
+		</figure>
+
+		<h2>What you now know</h2>
+		<p>
+			An extension is a default-exported function handed a capability object;
+			the runner translates registrations into the hooks and broadcasts
+			you've spent five modules reading; trust gates whose code gets this
+			power. The genuinely novel part is the loading — TypeScript, at
+			runtime, no build step. That trick is next.
+		</p>
+	</article>
+	<script src="../manifest.js"></script>
+	<script src="../assets/vendor/highlight.min.js"></script>
+	<script src="../assets/js/app.js" defer></script>
+</body>
+</html>

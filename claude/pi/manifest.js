@@ -1,0 +1,142 @@
+/* Course manifest — the single source of truth for ordering and navigation.
+   The runtime (assets/js/app.js) builds the sidebar, breadcrumbs, syllabus,
+   and prev/next links from this object. `soon: true` marks lessons that are
+   planned but not yet written. */
+
+window.COURSE = {
+	id: "pi",
+	title: "pi: Anatomy of an AI Coding Agent",
+	shortTitle: "pi",
+	repo: "github.com/earendil-works/pi",
+	license: "MIT",
+	modules: [
+		{
+			dir: "m1-orientation",
+			title: "Orientation",
+			blurb: "What pi is, how the repository is shaped, and how to read the language it's written in.",
+			lessons: [
+				{ file: "01-what-is-pi.html", title: "What is pi?", minutes: 7 },
+				{ file: "02-monorepo-tour.html", title: "A tour of the monorepo", minutes: 8 },
+				{ file: "03-reading-typescript.html", title: "How to read TypeScript (coming from Python)", minutes: 10 },
+				{ file: "04-layered-architecture.html", title: "The layered architecture", minutes: 7 },
+				{ file: "05-keeping-honest.html", title: "How the project keeps itself honest", minutes: 8 },
+				{ file: "06-using-this-course.html", title: "How to use this course", minutes: 4 },
+			],
+		},
+		{
+			dir: "m2-trace",
+			title: "One Message Through the System",
+			blurb: "You type a question; the model reads a file and answers. This module follows that single message through every layer — the map for everything that follows.",
+			lessons: [
+				{ file: "01-you-press-enter.html", title: "You press Enter", minutes: 8 },
+				{ file: "02-agent-takes-prompt.html", title: "The Agent takes your prompt", minutes: 9 },
+				{ file: "03-the-loop-turns.html", title: "The loop turns", minutes: 8 },
+				{ file: "04-talking-to-the-model.html", title: "Talking to the model", minutes: 9 },
+				{ file: "05-the-model-reads-a-file.html", title: "The model asks to read a file", minutes: 8 },
+				{ file: "06-pixels.html", title: "Streaming to your terminal", minutes: 7 },
+				{ file: "07-paper-trail.html", title: "The paper trail", minutes: 7 },
+			],
+		},
+		{
+			dir: "m3-ai-interface",
+			title: "pi-ai · One Interface for Every LLM",
+			blurb: "The vocabulary of the whole system: messages, tools, streaming events — and the machinery that makes 1,000+ models speak it.",
+			lessons: [
+				{ file: "01-message-types.html", title: "The Message types", minutes: 9 },
+				{ file: "02-tools-and-typebox.html", title: "Tools and TypeBox", minutes: 8 },
+				{ file: "03-providers-and-models.html", title: "Providers and 1,042 models", minutes: 8 },
+				{ file: "04-streaming-events.html", title: "The streaming event grammar", minutes: 8 },
+				{ file: "05-eventstream.html", title: "EventStream: an async iterable by hand", minutes: 9 },
+				{ file: "06-lazy-errors.html", title: "lazy.ts: errors become events", minutes: 7 },
+			],
+		},
+		{
+			dir: "m4-ai-adapters",
+			title: "pi-ai · Wire Adapters & Resilience",
+			blurb: "Where the abstraction meets the network: real HTTP requests, SSE parsing, vendor quirks, retries, and broken JSON.",
+			lessons: [
+				{ file: "01-two-layer-design.html", title: "Wire formats vs. vendors", minutes: 7 },
+				{ file: "02-anthropic-adapter.html", title: "Deep dive: the Anthropic adapter", minutes: 11 },
+				{ file: "03-compat.html", title: "The compatibility nightmare", minutes: 8 },
+				{ file: "04-retries.html", title: "Retries and error classification", minutes: 7 },
+				{ file: "05-json-repair.html", title: "Repairing broken JSON", minutes: 7 },
+				{ file: "06-caching-and-cost.html", title: "Prompt caching and the cost ledger", minutes: 8 },
+				{ file: "07-oauth-and-faux.html", title: "OAuth and the faux provider", minutes: 7 },
+			],
+		},
+		{
+			dir: "m5-agent-loop",
+			title: "pi-agent-core · The Loop",
+			blurb: "The 750 lines that make it an agent: the loop that streams, executes tools, and decides when to stop.",
+			lessons: [
+				{ file: "01-agenttool-convertllm.html", title: "AgentTool and the LLM boundary", minutes: 8 },
+				{ file: "02-runloop-turn.html", title: "runLoop, part 1: a turn", minutes: 11 },
+				{ file: "03-runloop-tools.html", title: "runLoop, part 2: executing tools", minutes: 10 },
+				{ file: "04-agent-class.html", title: "The Agent class", minutes: 9 },
+				{ file: "05-harness-1.html", title: "AgentHarness: sessions, trees, compaction", minutes: 8 },
+				{ file: "06-harness-2.html", title: "The plot twist: pi bypasses its own harness", minutes: 7 },
+			],
+		},
+		{
+			dir: "m6-tools",
+			title: "pi-coding-agent · Startup & Tools",
+			blurb: "From the pi command to a running product, and the seven tools that let a language model touch your filesystem.",
+			lessons: [
+				{ file: "01-startup.html", title: "From `pi` to a running mode", minutes: 8 },
+				{ file: "02-createagentsession.html", title: "createAgentSession: wiring it all together", minutes: 9 },
+				{ file: "03-mapping-a-giant-file.html", title: "Mapping a 3,000-line file", minutes: 8 },
+				{ file: "04-observation-tools.html", title: "Tools: read, ls, grep, find", minutes: 8 },
+				{ file: "05-bash-tool.html", title: "The bash tool", minutes: 9 },
+				{ file: "06-edit-write.html", title: "edit, write, and fuzzy matching", minutes: 10 },
+				{ file: "07-tool-anatomy.html", title: "Anatomy of a tool definition", minutes: 7 },
+			],
+		},
+		{
+			dir: "m7-context",
+			title: "pi-coding-agent · Sessions, Memory & Context",
+			blurb: "How conversations persist, branch, get compacted, and how the model learns what project it's working in.",
+			lessons: [
+				{ file: "01-session-persistence.html", title: "Session persistence", minutes: 8 },
+				{ file: "02-branching.html", title: "Branching and forking", minutes: 7 },
+				{ file: "03-compaction.html", title: "Compaction: forgetting gracefully", minutes: 8 },
+				{ file: "04-system-prompt.html", title: "Building the system prompt", minutes: 8 },
+				{ file: "05-project-context.html", title: "Project context: AGENTS.md", minutes: 7 },
+				{ file: "06-skills-commands.html", title: "Skills, templates, slash commands", minutes: 7 },
+			],
+		},
+		{
+			dir: "m8-extensions",
+			title: "Extensions",
+			blurb: "The self-extensible part: how pi loads TypeScript plugins at runtime and lets them reshape almost everything.",
+			lessons: [
+				{ file: "01-extension-api.html", title: "The extension system", minutes: 9 },
+				{ file: "02-jiti.html", title: "Running TypeScript at runtime", minutes: 7 },
+				{ file: "03-three-extensions.html", title: "Reading three real extensions", minutes: 9 },
+				{ file: "04-custom-providers.html", title: "Extending the model side", minutes: 7 },
+			],
+		},
+		{
+			dir: "m9-tui",
+			title: "pi-tui · Terminal Rendering From Scratch",
+			blurb: "A UI framework with no browser: components that render strings, a differential renderer, and the dark art of terminal input.",
+			lessons: [
+				{ file: "01-component-model.html", title: "The component model", minutes: 7 },
+				{ file: "02-differential-renderer.html", title: "The differential renderer", minutes: 10 },
+				{ file: "03-input-1.html", title: "Keyboard input, part 1: raw mode", minutes: 8 },
+				{ file: "04-input-2.html", title: "Keyboard input, part 2: keys.ts", minutes: 8 },
+				{ file: "05-editor.html", title: "The Editor", minutes: 8 },
+				{ file: "06-markdown.html", title: "Streaming Markdown", minutes: 7 },
+			],
+		},
+		{
+			dir: "m10-appendix",
+			title: "Appendix: Frontiers & Next Steps",
+			blurb: "pi as a machine-readable subprocess, fleets of agents, and where to go from here.",
+			lessons: [
+				{ file: "01-other-modes.html", title: "The other modes: print, JSON, RPC", minutes: 7 },
+				{ file: "02-orchestrator.html", title: "The orchestrator", minutes: 7 },
+				{ file: "03-where-next.html", title: "Where to go from here", minutes: 6 },
+			],
+		},
+	],
+};

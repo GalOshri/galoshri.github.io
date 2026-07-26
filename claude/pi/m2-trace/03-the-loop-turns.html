@@ -1,0 +1,188 @@
+<!doctype html>
+<html lang="en">
+<head>
+	<meta charset="utf-8">
+	<meta name="viewport" content="width=device-width, initial-scale=1">
+	<title>The loop turns · pi · Codebase Academy</title>
+	<link rel="stylesheet" href="../assets/css/site.css">
+</head>
+<body>
+	<article class="lesson">
+		<h1>The loop turns</h1>
+		<p class="lede">
+			We've arrived at the center of the machine:
+			<code>runLoop</code> in <code>agent-loop.ts</code> — about 750 lines of
+			file, one idea. You met a condensed version in the very first lesson;
+			now you can see the real structure, and this time you know what a message
+			and an event are.
+		</p>
+
+		<h2>The shape: two loops, one inside the other</h2>
+		<figure class="svg-diagram">
+			<svg viewBox="0 0 600 330" width="600" role="img" aria-label="runLoop flowchart: inject pending messages, stream assistant response, if tool calls execute and repeat, otherwise check follow-up queue, then end">
+				<defs>
+					<marker id="arr2" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+						<path d="M0,0 L10,5 L0,10 z" fill="currentColor" opacity="0.55"/>
+					</marker>
+				</defs>
+				<g fill="none" stroke="currentColor" stroke-opacity="0.5" stroke-width="1.5">
+					<rect x="185" y="12" width="230" height="40" rx="9"/>
+					<rect x="185" y="88" width="230" height="40" rx="9"/>
+					<rect x="185" y="164" width="230" height="40" rx="9"/>
+					<rect x="30" y="164" width="110" height="40" rx="20"/>
+					<rect x="185" y="252" width="230" height="40" rx="9"/>
+					<rect x="470" y="252" width="110" height="40" rx="20"/>
+					<line x1="300" y1="52" x2="300" y2="85" marker-end="url(#arr2)"/>
+					<line x1="300" y1="128" x2="300" y2="161" marker-end="url(#arr2)"/>
+					<path d="M 185 184 L 143 184" marker-end="url(#arr2)"/>
+					<path d="M 85 164 C 85 100 120 108 182 108" marker-end="url(#arr2)"/>
+					<line x1="300" y1="204" x2="300" y2="249" marker-end="url(#arr2)"/>
+					<path d="M 415 272 L 467 272" marker-end="url(#arr2)"/>
+					<path d="M 525 252 C 525 40 460 32 418 32" marker-end="url(#arr2)"/>
+				</g>
+				<g fill="currentColor" font-size="13" text-anchor="middle">
+					<text x="300" y="37">inject pending messages</text>
+					<text x="300" y="108">ask the model</text>
+					<text x="300" y="113" dy="12" opacity="0.6" font-size="11">(stream assistant response)</text>
+					<text x="300" y="184">tool calls in reply?</text>
+					<text x="85" y="188">yes: run them</text>
+					<text x="300" y="272">follow-up queued?</text>
+					<text x="525" y="276">no: end</text>
+					<text x="163" y="178" opacity="0.6" font-size="10">yes</text>
+					<text x="313" y="232" opacity="0.6" font-size="10">no</text>
+					<text x="440" y="265" opacity="0.6" font-size="10">yes → loop again</text>
+					<text x="120" y="90" opacity="0.6" font-size="10">results feed back</text>
+				</g>
+			</svg>
+			<figcaption>The inner loop turns while the model wants tools; the outer loop restarts everything if follow-up messages arrived while it worked.</figcaption>
+		</figure>
+
+		<p>And here is that diagram in code — the real skeleton, lightly trimmed:</p>
+
+		<figure class="code">
+			<figcaption><span>packages/agent/src/agent-loop.ts</span><span class="lines">runLoop, abridged</span></figcaption>
+			<pre><code class="language-typescript">// Check for steering messages at start (user may have typed while waiting)
+let pendingMessages: AgentMessage[] = (await config.getSteeringMessages?.()) || [];
+
+// Outer loop: continues when queued follow-up messages arrive after agent would stop
+while (true) {
+	let hasMoreToolCalls = true;
+
+	// Inner loop: process tool calls and steering messages
+	while (hasMoreToolCalls || pendingMessages.length > 0) {
+		// Process pending messages (inject before next assistant response)
+		for (const message of pendingMessages) {
+			currentContext.messages.push(message);
+		}
+		pendingMessages = [];
+
+		// Stream assistant response
+		const message = await streamAssistantResponse(currentContext, config, signal, emit, streamFn);
+
+		if (message.stopReason === "error" || message.stopReason === "aborted") {
+			await emit({ type: "agent_end", messages: newMessages });
+			return;
+		}
+
+		// Check for tool calls
+		const toolCalls = message.content.filter((c) => c.type === "toolCall");
+
+		hasMoreToolCalls = false;
+		if (toolCalls.length > 0) {
+			const executedToolBatch = await executeToolCalls(currentContext, message, config, signal, emit);
+			hasMoreToolCalls = !executedToolBatch.terminate;
+			for (const result of executedToolBatch.messages) {
+				currentContext.messages.push(result);
+			}
+		}
+
+		await emit({ type: "turn_end", message, toolResults });
+		// ...then poll getSteeringMessages() again → pendingMessages
+	}
+
+	// Inner loop done. Anything queued as a follow-up?
+	// If yes → pendingMessages = those, loop again. If no → break.
+}</code></pre>
+		</figure>
+
+		<h2>Reading it as a story</h2>
+		<p>For our traced message, the story will be short:</p>
+		<ul>
+			<li><strong>Turn 1.</strong> The conversation (system prompt + your one user message) goes to the model. The model replies: "I should look at the file" — a reply <em>containing a tool call</em>. The loop runs the <code>read</code> tool, appends the result to the conversation, and turns again.</li>
+			<li><strong>Turn 2.</strong> The conversation — now user message, assistant tool-call, tool result — goes to the model <em>again, in full</em> (remember: the model is stateless). This time it replies with prose. No tool calls → <code>hasMoreToolCalls = false</code> → inner loop exits.</li>
+			<li><strong>Epilogue.</strong> You haven't typed anything meanwhile, so the follow-up queue is empty and the outer loop breaks. <code>agent_end</code>.</li>
+		</ul>
+		<p>
+			Notice the two queues getting drained at the seams. <em>Steering</em>
+			messages slip in <em>between turns</em> — that's what happens when you type
+			while pi works, and why it reacts to mid-task corrections without
+			restarting. <em>Follow-ups</em> wait politely until the agent would stop.
+			The queues themselves live in the <code>Agent</code> class from last
+			lesson; the loop just polls them at the right moments.
+		</p>
+		<p>
+			And notice what the loop does <em>not</em> contain: no UI, no file paths,
+			no provider names, no persistence. It receives a config full of functions
+			(<code>getSteeringMessages</code>, <code>convertToLlm</code>, the tools
+			themselves) and calls them at the right times. That's dependency injection
+			without the framework — and it's why this same loop can power a terminal
+			app, a Slack bot, or a test harness.
+		</p>
+
+		<aside class="concept" data-kind="node">
+			<p class="concept-label">Node.js · async/await, and where the parallelism isn't</p>
+			<p>
+				Every interesting line here says <code>await</code>: the code
+				<em>pauses</em> at that point until a slow operation (a network
+				response, a file read) completes, without freezing the program — other
+				work, like repainting the screen, proceeds meanwhile. If you know
+				Python's <code>asyncio</code>, this is the same
+				<code>async def</code>/<code>await</code> idea with one glorious
+				simplification: <strong>there is no event-loop bookkeeping</strong>. No
+				<code>asyncio.run()</code>, no "am I in a loop?" errors. JavaScript
+				runtimes have exactly one event loop, always running; every program is
+				async by birth.
+			</p>
+			<p>
+				One thing <code>async</code> does <em>not</em> give you is parallel
+				CPU work — JavaScript is single-threaded, like Python-with-GIL but
+				stricter. Concurrency here means <em>overlapping waits</em>, which is
+				perfect for an agent: it's almost always waiting on a model or a
+				subprocess. An <code>async</code> function returns a
+				<code>Promise</code> — Python's <code>Future</code>, near enough —
+				and <code>await</code> unwraps it. We'll open Promises properly in
+				Module 3.
+			</p>
+		</aside>
+
+		<details class="digression">
+			<summary>What's the <code>emit(...)</code> on every other line?</summary>
+			<div class="digression-body">
+				<p>
+					That's the broadcast channel from last lesson. The loop is handed an
+					<code>emit</code> function; every lifecycle moment
+					(<code>turn_end</code>, <code>message_start</code>…) is announced
+					through it, and the <code>Agent</code> class fans each event out to
+					subscribers <em>and waits for them</em> before proceeding. That
+					little <code>await emit(...)</code> hides a strong guarantee: the UI
+					and the session log are never behind the loop. Module 5 examines why
+					that's worth its costs.
+				</p>
+			</div>
+		</details>
+
+		<h2>What you now know</h2>
+		<p>
+			The agent is two nested <code>while</code> loops: the inner one turns as
+			long as the model requests tools (feeding results back into the
+			conversation), the outer one restarts for queued follow-ups. Next lesson
+			we zoom into the single most important call inside it —
+			<code>streamAssistantResponse</code> — and watch your message actually
+			leave the process.
+		</p>
+	</article>
+	<script src="../manifest.js"></script>
+	<script src="../assets/vendor/highlight.min.js"></script>
+	<script src="../assets/js/app.js" defer></script>
+</body>
+</html>

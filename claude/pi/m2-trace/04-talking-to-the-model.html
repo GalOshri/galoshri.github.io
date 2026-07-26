@@ -1,0 +1,197 @@
+<!doctype html>
+<html lang="en">
+<head>
+	<meta charset="utf-8">
+	<meta name="viewport" content="width=device-width, initial-scale=1">
+	<title>Talking to the model · pi · Codebase Academy</title>
+	<link rel="stylesheet" href="../assets/css/site.css">
+</head>
+<body>
+	<article class="lesson">
+		<h1>Talking to the model</h1>
+		<p class="lede">
+			Inside the loop sits one function where the conversation leaves the
+			process and crosses the network:
+			<code>streamAssistantResponse</code>. This is also the border crossing
+			between the agent layer and <code>pi-ai</code> — and where "the model is
+			typing…" becomes a real, visible mechanism.
+		</p>
+
+		<h2>Packing the bags: building the LLM context</h2>
+		<div class="walkthrough">
+			<figure class="code">
+				<figcaption><span>packages/agent/src/agent-loop.ts</span><span class="lines">streamAssistantResponse, first half</span></figcaption>
+				<pre><code class="language-typescript">async function streamAssistantResponse(context, config, signal, emit, streamFn) {
+	// Apply context transform if configured (AgentMessage[] → AgentMessage[])
+	let messages = context.messages;
+	if (config.transformContext) {
+		messages = await config.transformContext(messages, signal);
+	}
+
+	// Convert to LLM-compatible messages (AgentMessage[] → Message[])
+	const llmMessages = await config.convertToLlm(messages);</code></pre>
+			</figure>
+			<p class="anno">
+				Two preprocessing hooks before anything is sent. <code>transformContext</code>
+				lets the app prune or rewrite the conversation (the coding agent uses this
+				for compaction, Module 7). Then <code>convertToLlm</code> translates the
+				agent's richer message vocabulary down to what a model API understands —
+				the coding agent has custom message types (bash executions you ran
+				yourself, extension messages) that get converted or dropped here. The
+				comment in the source says it plainly: this is <em>the only place</em>
+				that translation happens.
+			</p>
+			<figure class="code">
+				<pre><code class="language-typescript">	// Build LLM context
+	const llmContext: Context = {
+		systemPrompt: context.systemPrompt,
+		messages: llmMessages,
+		tools: context.tools,
+	};
+
+	// Resolve API key (important for expiring tokens)
+	const resolvedApiKey =
+		(config.getApiKey ? await config.getApiKey(config.model.provider) : undefined) || config.apiKey;
+
+	const response = await streamFunction(config.model, llmContext, {
+		...config,
+		apiKey: resolvedApiKey,
+		signal,
+	});</code></pre>
+			</figure>
+			<p class="anno">
+				The whole request is three fields: <strong>system prompt</strong> (standing
+				instructions — Module 7 shows pi's), <strong>messages</strong> (the entire
+				conversation, every time), and <strong>tools</strong> (descriptions of what
+				the model may ask for — next lesson). The API key is resolved <em>fresh
+				each call</em> because subscription tokens expire mid-session. Then one
+				call into <code>pi-ai</code>: <code>streamFunction</code>, by default
+				<code>streamSimple</code>, which speaks the right wire protocol for
+				whatever <code>config.model</code> is — Anthropic, OpenAI, Google, or 32
+				other providers. The loop neither knows nor cares which.
+			</p>
+		</div>
+
+		<aside class="concept" data-kind="llm">
+			<p class="concept-label">LLM · Streaming, and why it isn't cosmetic</p>
+			<p>
+				A model generates text one <em>token</em> (word-fragment) at a time; a
+				long answer can take a minute. Providers therefore offer streaming
+				APIs: instead of one response at the end, you receive a live feed of
+				fragments as they're generated. For a chat UI that's nice — you watch
+				the answer type itself. For an <em>agent</em> it's essential: pi can
+				show a tool call forming, start a spinner, or let you abort a doomed
+				response seconds in, rather than paying for a full wrong answer. The
+				underlying wire format (Server-Sent Events) is Module 4's subject;
+				what reaches this function has already been normalized.
+			</p>
+		</aside>
+
+		<h2>Drinking from the stream</h2>
+		<p>
+			What does <code>streamSimple</code> return? Not the reply — a
+			<em>stream of events about the reply being born</em>. The second half of
+			the function consumes it:
+		</p>
+
+		<figure class="code">
+			<figcaption><span>packages/agent/src/agent-loop.ts</span><span class="lines">streamAssistantResponse, second half, abridged</span></figcaption>
+			<pre><code class="language-typescript">	let partialMessage: AssistantMessage | null = null;
+
+	for await (const event of response) {
+		switch (event.type) {
+			case "start":
+				partialMessage = event.partial;
+				context.messages.push(partialMessage);
+				await emit({ type: "message_start", message: { ...partialMessage } });
+				break;
+
+			case "text_delta":      // a few more characters of prose arrived
+			case "thinking_delta":  // ...of the model's reasoning
+			case "toolcall_delta":  // ...of a tool call's JSON arguments
+			// (and the matching _start/_end events)
+				partialMessage = event.partial;
+				context.messages[context.messages.length - 1] = partialMessage;
+				await emit({ type: "message_update", assistantMessageEvent: event, message: { ...partialMessage } });
+				break;
+
+			case "done":
+			case "error": {
+				const finalMessage = await response.result();
+				context.messages[context.messages.length - 1] = finalMessage;
+				await emit({ type: "message_end", message: finalMessage });
+				return finalMessage;
+			}
+		}
+	}</code></pre>
+		</figure>
+
+		<p>
+			Recognize the pattern from lesson 2.2? Another discriminated union,
+			another <code>switch</code> on <code>.type</code>. Two clever details:
+		</p>
+		<ul>
+			<li>
+				<strong>Every event carries <code>partial</code></strong> — a complete
+				snapshot of the assistant message <em>so far</em>. Consumers never
+				assemble fragments themselves; they always hold a valid message that
+				simply keeps growing. The half-born message even sits in the
+				conversation array already, replaced wholesale on each event.
+			</li>
+			<li>
+				<strong>Errors arrive as events, not exceptions.</strong> The
+				<code>error</code> case is handled in the same switch, and the loop
+				above reacts to <code>stopReason === "error"</code> on an ordinary
+				message. Network failures are data, not control flow — a design rule
+				enforced across all of <code>pi-ai</code> (lesson 3.6 shows how).
+			</li>
+		</ul>
+
+		<aside class="concept" data-kind="node">
+			<p class="concept-label">Node.js · Async iterators and <code>for await</code></p>
+			<p>
+				<code>for await (const event of response)</code> is Python's
+				<code>async for event in response</code>. The object being looped over
+				is an <em>async iterable</em>: each iteration <code>await</code>s the
+				next value, so the loop body runs when data arrives and sleeps in
+				between. It's the natural shape for "a sequence that trickles in over
+				time" — streaming tokens, lines from a subprocess, rows from a slow
+				query.
+			</p>
+			<p>
+				Just as Python has generators (<code>yield</code>) to produce such
+				sequences, JavaScript has <code>async function*</code>. pi actually
+				hand-rolls its stream object instead of using a generator — a
+				push-queue called <code>EventStream</code> with a bonus
+				<code>result()</code> promise for "just give me the final message"
+				(you can see it used in the <code>done</code> case above). Lesson 3.5
+				builds it from scratch.
+			</p>
+		</aside>
+
+		<h2>Meanwhile, on your screen</h2>
+		<p>
+			Follow one keypress-worth of model output all the way now: a token arrives
+			over the network → the adapter parses it → <code>text_delta</code> event →
+			this switch updates <code>partialMessage</code> → <code>message_update</code>
+			goes out on the broadcast channel → the UI subscriber updates a component →
+			the renderer repaints one line of your terminal (lesson 2.6). That entire
+			pipeline runs perhaps fifty times a second while the model "types." Nothing
+			anywhere blocks; it's <code>await</code> all the way down.
+		</p>
+
+		<h2>What you now know</h2>
+		<p>
+			One function packs the conversation into <code>{systemPrompt, messages,
+			tools}</code>, hands it to <code>pi-ai</code>, and folds the resulting
+			event stream back into an ever-more-complete assistant message. For our
+			traced question, the first response ends not with prose but with
+			<code>stopReason: "toolUse"</code> — the model wants to <em>read a
+			file</em>. That's next.
+		</p>
+	</article>
+	<script src="../manifest.js"></script>
+	<script src="../assets/vendor/highlight.min.js"></script>
+	<script src="../assets/js/app.js" defer></script>
+</body>
+</html>

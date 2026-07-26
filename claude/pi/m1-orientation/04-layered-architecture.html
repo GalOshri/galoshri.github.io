@@ -1,0 +1,153 @@
+<!doctype html>
+<html lang="en">
+<head>
+	<meta charset="utf-8">
+	<meta name="viewport" content="width=device-width, initial-scale=1">
+	<title>The layered architecture · pi · Codebase Academy</title>
+	<link rel="stylesheet" href="../assets/css/site.css">
+</head>
+<body>
+	<article class="lesson">
+		<h1>The layered architecture</h1>
+		<p class="lede">
+			You've seen that pi's five packages form a straight dependency line. This
+			lesson is about why that line is the most important design decision in the
+			repository — and how to verify architectural claims like this one yourself,
+			from the code, rather than taking documentation on faith.
+		</p>
+
+		<h2>The rule: dependencies point one way</h2>
+		<figure class="diagram">
+			<div class="drow">
+				<div class="dbox"><span class="dbox-title">pi-tui</span><span class="dbox-sub">"draw lines of text in a terminal"</span></div>
+				<div class="dbox"><span class="dbox-title">pi-ai</span><span class="dbox-sub">"talk to a language model"</span></div>
+			</div>
+			<span class="darrow">↑ never looks down at ↑</span>
+			<div class="drow">
+				<div class="dbox"><span class="dbox-title">pi-agent-core</span><span class="dbox-sub">"loop a model over tools"</span></div>
+			</div>
+			<span class="darrow">↑ never looks down at ↑</span>
+			<div class="drow">
+				<div class="dbox accent"><span class="dbox-title">pi-coding-agent</span><span class="dbox-sub">"be a coding assistant product"</span></div>
+			</div>
+			<figcaption class="dcaption">Each layer knows only the layers below it. Read the arrows as "is imported by".</figcaption>
+		</figure>
+
+		<p>Spelled out, the contract is:</p>
+		<ul>
+			<li><strong>pi-tui</strong> knows how to render text and read keystrokes. It contains the word "terminal" thousands of times and the word "model" zero times. You could use it to build a terminal Tetris.</li>
+			<li><strong>pi-ai</strong> knows how to send messages to LLM providers and stream responses back. It has no concept of an agent, a tool <em>executing</em>, or a screen. You could use it to build a chatbot with no loop at all.</li>
+			<li><strong>pi-agent-core</strong> knows the loop: send context, collect tool calls, execute, repeat. It doesn't know the tools are about <em>coding</em> — it would run a cooking agent just as happily. And it has no user interface whatsoever.</li>
+			<li><strong>pi-coding-agent</strong> is where it all becomes a product: coding tools (read/edit/bash), a terminal chat UI, session files, settings. It writes almost no fundamentals itself — it composes the three layers below.</li>
+		</ul>
+
+		<h2>Don't trust the diagram — check the imports</h2>
+		<p>
+			In a big codebase, architecture documents drift out of date. The ground
+			truth is always the import statements. Here are the first lines of the
+			agent loop's source file — the heart of <code>pi-agent-core</code>:
+		</p>
+
+		<figure class="code">
+			<figcaption><span>packages/agent/src/agent-loop.ts</span><span class="lines">lines 6–24</span></figcaption>
+			<pre><code class="language-typescript">import {
+	type AssistantMessage,
+	type Context,
+	EventStream,
+	streamSimple,
+	type ToolResultMessage,
+	validateToolArguments,
+} from "@earendil-works/pi-ai/compat";
+import type {
+	AgentContext,
+	AgentEvent,
+	AgentLoopConfig,
+	AgentMessage,
+	AgentTool,
+	AgentToolCall,
+	AgentToolResult,
+	StreamFn,
+} from "./types.ts";</code></pre>
+		</figure>
+
+		<p>
+			Two imports: the package one layer down (<code>pi-ai</code>), and its own
+			local types. No <code>pi-tui</code>, no <code>pi-coding-agent</code> —
+			the loop literally cannot mention a screen or a coding tool, because
+			nothing of the sort is in scope. Meanwhile <code>pi-tui</code>'s own
+			manifest lists exactly two external dependencies — a Markdown parser and a
+			Unicode-width table — and zero internal ones. The architecture isn't a
+			promise; it's mechanically enforced by what each package is allowed to
+			import.
+		</p>
+
+		<aside class="concept" data-kind="eng">
+			<p class="concept-label">Engineering · Dependency direction and layering</p>
+			<p>
+				The deepest idea in large-scale code organization: <strong>stable things
+				should not depend on volatile things</strong>. "What a message is"
+				changes rarely; "how the footer looks" changes weekly. By forcing all
+				arrows to point from volatile (product) to stable (primitives), a change
+				at the top can never break the bottom, and each lower layer can be
+				understood, tested, and reused in isolation.
+			</p>
+			<p>
+				The classic smell to watch for is the <em>cycle</em>: A imports B and B
+				imports A, which means neither can be understood alone and they're
+				really one tangled unit. Python projects fight the same battle with
+				circular <code>import</code> errors — the difference here is that the
+				package boundary makes the layering physical. <code>packages/tui</code>
+				could not import the agent even by accident; npm wouldn't resolve it.
+			</p>
+		</aside>
+
+		<h2>What the layering buys, concretely</h2>
+		<p>Three real payoffs you'll witness during this course:</p>
+		<ul>
+			<li>
+				<strong>Reuse.</strong> The same <code>pi-agent-core</code> that powers
+				this terminal app also powers <code>pi-chat</code>, the team's separate
+				Slack-automation project. No UI in the loop means any UI can be bolted
+				on — including "no UI at all," which is exactly what pi's headless RPC
+				mode is (Module 10).
+			</li>
+			<li>
+				<strong>Testability.</strong> Because <code>pi-ai</code> hides all
+				providers behind one interface, the test suite swaps in a scripted fake
+				provider (the "faux" provider, Module 4) and tests the entire agent
+				stack without network calls or API bills.
+			</li>
+			<li>
+				<strong>Learnability.</strong> This one benefits you directly. Each
+				module of this course studies one layer while treating the layer below
+				as a solved black box. That's not a teaching simplification — it's
+				genuinely how the code is built, and how professionals navigate any
+				large system: pick a layer, trust its neighbors' contracts.
+			</li>
+		</ul>
+
+		<h2>Where the seams show</h2>
+		<p>
+			Real codebases are never perfectly clean, and honest reading means noticing
+			the seams. Two you'll meet later: <code>pi-agent-core</code> ships a
+			"batteries included" harness layer that the coding agent <em>ignores</em>,
+			preferring to hand-wire its own (the plot twist of Module 5); and the
+			coding agent's interactive mode is a single 5,800-line file that composition
+			didn't save from growing huge (Module 6 turns reading such files into a
+			skill). Layering constrains where mess can live; it doesn't abolish mess.
+		</p>
+
+		<h2>What you now know</h2>
+		<p>
+			pi is four one-way layers plus an experiment on top. When you're lost at
+			any point in this course, come back to one question: <em>which layer am I
+			in, and what does it import?</em> Next lesson: the tooling that keeps all
+			this consistent — formatters, type checkers, and a file of rules addressed
+			to both humans and AIs.
+		</p>
+	</article>
+	<script src="../manifest.js"></script>
+	<script src="../assets/vendor/highlight.min.js"></script>
+	<script src="../assets/js/app.js" defer></script>
+</body>
+</html>

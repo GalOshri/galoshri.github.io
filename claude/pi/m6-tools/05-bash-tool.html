@@ -1,0 +1,149 @@
+<!doctype html>
+<html lang="en">
+<head>
+	<meta charset="utf-8">
+	<meta name="viewport" content="width=device-width, initial-scale=1">
+	<title>The bash tool · pi · Codebase Academy</title>
+	<link rel="stylesheet" href="../assets/css/site.css">
+</head>
+<body>
+	<article class="lesson">
+		<h1>The bash tool</h1>
+		<p class="lede">
+			The most powerful tool in the box: arbitrary shell commands, which is to
+			say <em>everything</em>. Its schema is two fields; its implementation is
+			470 lines of process management — and the gap between those numbers is
+			this lesson.
+		</p>
+
+		<h2>Spawning like you mean it</h2>
+		<figure class="code">
+			<figcaption><span>packages/coding-agent/src/core/tools/bash.ts</span><span class="lines">the spawn, abridged</span></figcaption>
+			<pre><code class="language-typescript">const child = spawn(shellConfig.shell, commandFromStdin ? shellConfig.args : [...shellConfig.args, command], {
+	cwd,
+	detached: process.platform !== "win32",
+	env: env ?? getShellEnv(),
+	stdio: [commandFromStdin ? "pipe" : "ignore", "pipe", "pipe"],
+	windowsHide: true,
+});
+if (child.pid) trackDetachedChildPid(child.pid);</code></pre>
+		</figure>
+
+		<aside class="concept" data-kind="node">
+			<p class="concept-label">Node.js · child_process, vs Python's subprocess</p>
+			<p>
+				<code>spawn(cmd, args, options)</code> is
+				<code>subprocess.Popen</code>: start a process, get back a handle
+				with <code>stdout</code>/<code>stderr</code> streams and events.
+				The idiomatic difference: where Python often blocks on
+				<code>proc.communicate()</code>, Node code subscribes —
+				<code>child.stdout.on("data", ...)</code> — and stays responsive
+				(the event-driven style Python asyncio gets via
+				<code>create_subprocess_exec</code>).
+			</p>
+			<p>
+				The options here are all deliberate. <code>cwd</code>: run where the
+				agent works. <code>env</code>: a curated login-shell environment.
+				<code>stdio</code>: pipe the outputs, ignore-or-pipe stdin. And the
+				crucial one — <code>detached: true</code> — puts the child in its
+				<em>own process group</em>, which looks pointless until you need to
+				kill it.
+			</p>
+		</aside>
+
+		<h2>The kill problem</h2>
+		<p>
+			Run <code>npm test</code> and the shell spawns node, which spawns
+			workers, which spawn more workers. Kill only the shell and the
+			grandchildren keep running — orphaned test suites chewing CPU behind
+			your back. The fix is the process group: with <code>detached</code>,
+			killing the <em>group</em> (<code>killProcessTree</code> sends the
+			signal to <code>-pid</code>, the negative PID meaning "everyone in the
+			group") takes the whole family down. Watch it wired to both time and
+			the user's escape key:
+		</p>
+		<figure class="code">
+			<figcaption><span>packages/coding-agent/src/core/tools/bash.ts</span><span class="lines">timeout + abort wiring, abridged</span></figcaption>
+			<pre><code class="language-typescript">const onAbort = () =&gt; {
+	if (child.pid) killProcessTree(child.pid);
+};
+
+try {
+	if (timeoutMs !== undefined) {
+		timeoutHandle = setTimeout(() =&gt; {
+			timedOut = true;
+			if (child.pid) killProcessTree(child.pid);
+		}, timeoutMs);
+	}
+	child.stdout?.on("data", onData);
+	child.stderr?.on("data", onData);
+	if (signal) {
+		if (signal.aborted) onAbort();
+		else signal.addEventListener("abort", onAbort, { once: true });
+	}
+	const exitCode = await waitForChildProcess(child);
+	if (signal?.aborted) throw new Error("aborted");
+	if (timedOut) throw new Error(`timeout:${timeout}`);
+	return { exitCode };
+} finally {
+	if (child.pid) untrackDetachedChildPid(child.pid);
+	if (timeoutHandle) clearTimeout(timeoutHandle);
+	if (signal) signal.removeEventListener("abort", onAbort);
+}</code></pre>
+		</figure>
+		<p>
+			There's lesson 5.3's <code>AbortSignal</code> arriving at its final
+			destination: <kbd>Esc</kbd> in the TUI → controller aborts → this
+			listener fires → the whole process tree dies. Note the paranoid details:
+			checking <code>signal.aborted</code> <em>before</em> subscribing (the
+			abort may have happened already), <code>{ once: true }</code>, and a
+			<code>finally</code> that unhooks everything — listener leaks in
+			long-lived processes are how memory quietly disappears. The
+			<code>trackDetachedChildPid</code> registry is the last resort: if pi
+			itself dies, an exit handler still knows which orphans to reap.
+		</p>
+
+		<h2>Output: streaming and two-sided truncation</h2>
+		<p>
+			Both stdout and stderr feed an <code>OutputAccumulator</code> —
+			interleaved in arrival order, like a real terminal. It solves two
+			problems at once: <em>streaming</em> — partial output flows through the
+			tool's <code>onUpdate</code> callback (lesson 5.3), which is why you
+			watch test output scroll live; and <em>budgeting</em> — but with a
+			twist. For bash, the <em>end</em> of output usually matters most
+			(the error is at the bottom of the build log), so bash truncates from
+			the <em>head</em> (<code>truncateTail</code> keeps the tail), the
+			opposite of read. When output is huge, the accumulator spills the full
+			transcript to a temp file and tells the model the path — so the model
+			can <code>grep</code> the full log if it needs the middle. The scarce
+			resource gets the summary; the filesystem keeps the truth.
+		</p>
+
+		<h2>The shell itself</h2>
+		<p>
+			<code>getShellConfig()</code> (in <code class="path">utils/shell.ts</code>)
+			picks your login shell — zsh, bash, fish, PowerShell on Windows — with
+			its rc files, so the model's commands see the same aliases, PATH and
+			node version <em>you</em> see. Agents that spawn a bare
+			<code>/bin/sh</code> mysteriously can't run half of what their users
+			can; this is that bug, pre-fixed. And note what pi deliberately does
+			<em>not</em> add: no sandbox, no allow-list — the README says plainly
+			that pi runs with your permissions, and containment is your job
+			(or an extension's: lesson 8.3 shows a permission gate, and there's a
+			pluggable <code>BashOperations</code> for routing commands into VMs).
+			The tool's honesty about its danger is itself a design decision.
+		</p>
+
+		<h2>What you now know</h2>
+		<p>
+			bash = spawn in a killable process group + interleaved streaming output
+			+ tail-biased truncation with a spill file + your real shell + explicit
+			non-containment. Next: the tools that rewrite files — and the fuzzy
+			matching that keeps model-made edits from missing.
+		</p>
+	</article>
+	<script src="../manifest.js"></script>
+	<script src="../assets/vendor/highlight.min.js"></script>
+	<script src="../assets/js/app.js" defer></script>
+</body>
+</html>

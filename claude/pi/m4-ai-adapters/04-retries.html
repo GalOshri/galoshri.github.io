@@ -1,0 +1,152 @@
+<!doctype html>
+<html lang="en">
+<head>
+	<meta charset="utf-8">
+	<meta name="viewport" content="width=device-width, initial-scale=1">
+	<title>Retries and error classification · pi · Codebase Academy</title>
+	<link rel="stylesheet" href="../assets/css/site.css">
+</head>
+<body>
+	<article class="lesson">
+		<h1>Retries and error classification</h1>
+		<p class="lede">
+			LLM providers fail constantly — overloaded, rate-limited, mid-stream
+			disconnects. The difference between an agent that shrugs and one that
+			dies is knowing <em>which</em> failures to retry. pi's answer is a
+			deliberately humble file: two regexes and a comment explaining what it
+			refuses to do.
+		</p>
+
+		<h2>Classify, don't decide</h2>
+		<figure class="code">
+			<figcaption><span>packages/ai/src/utils/retry.ts</span><span class="lines">the classifier, verbatim</span></figcaption>
+			<pre><code class="language-typescript">/**
+ * Classifies whether a failed assistant message looks like a transient provider
+ * or transport error, so callers can decide if the last assistant turn should be
+ * restarted.
+ *
+ * This does not implement retry policy. Callers should first handle context
+ * overflow separately, then apply their own retry budget, backoff, and reporting
+ * before restarting the assistant turn.
+ */
+export function isRetryableAssistantError(message: AssistantMessage): boolean {
+	if (message.stopReason !== "error" || !message.errorMessage) return false;
+	const errorMessage = message.errorMessage;
+	if (NON_RETRYABLE_PROVIDER_LIMIT_ERROR_PATTERN.test(errorMessage)) return false;
+	return RETRYABLE_PROVIDER_ERROR_PATTERN.test(errorMessage);
+}</code></pre>
+		</figure>
+		<p>
+			Note the input type: an <code>AssistantMessage</code>. Because errors are
+			values (lesson 3.6), the classifier examines a message, not an exception.
+			And note the doc comment drawing a boundary: this function
+			<em>classifies</em>; the retry <em>policy</em> — how many attempts, what
+			backoff, what to show the user — belongs to the caller. The coding
+			agent's session layer supplies that policy with user-visible countdowns;
+			a headless deployment might choose differently. Mechanism here, policy
+			up there: layering applied to failure handling.
+		</p>
+
+		<h2>The knowledge base: two regexes</h2>
+		<p>
+			The classification itself is string matching against accumulated
+			experience. First, the <em>never retry</em> list — failures where trying
+			again just burns time or money:
+		</p>
+		<figure class="code">
+			<figcaption><span>packages/ai/src/utils/retry.ts</span><span class="lines">non-retryable patterns, abridged</span></figcaption>
+			<pre><code class="language-typescript">const NON_RETRYABLE_PROVIDER_LIMIT_ERROR_PATTERN = buildProviderErrorPattern([
+	// OpenCode Go/free-tier limits ... subscription/account limits, not transient throttles.
+	"GoUsageLimitError",
+	"FreeUsageLimitError",
+	"Monthly usage limit reached",
+
+	// Generic quota/budget/billing exhaustion. `insufficient_quota` is OpenAI's
+	// quota/billing error code; the other strings cover common gateway wording.
+	"insufficient_quota",
+	"out of budget",
+	"quota exceeded",
+	"billing",
+]);</code></pre>
+		</figure>
+		<p>Then the <em>worth retrying</em> list — a taxonomy of transience, with the bug numbers that earned each entry:</p>
+		<figure class="code">
+			<figcaption><span>packages/ai/src/utils/retry.ts</span><span class="lines">retryable patterns, abridged</span></figcaption>
+			<pre><code class="language-typescript">const RETRYABLE_PROVIDER_ERROR_PATTERN = buildProviderErrorPattern([
+	// Generic provider load, HTTP status, and server-side transient failures.
+	"overloaded", "rate.?limit", "too many requests", "429", "500", "502", "503", "504",
+
+	// Network, proxy, and fetch transport failures. This includes OpenAI Codex
+	// raw-fetch failures such as "upstream connect" ... (#733), plus OpenRouter
+	// connection drops (#3317).
+	"connection.?refused", "other side closed", "fetch failed", "socket hang up", "timed? out",
+
+	// Premature stream endings ... "Anthropic stream ended before message_stop"
+	// (#4433); Bedrock/Smithy can throw an HTTP/2 no-response error (#3594).
+	"ended without", "stream ended before message_stop",
+
+	// Explicit retry guidance emitted mid-stream by OpenAI Responses and Bedrock (#6019).
+	"you can retry your request", "try your request again",
+]);</code></pre>
+		</figure>
+		<p>
+			Yes: production reliability for a thousand models comes down to regexes
+			over error prose. It looks crude and it is exactly right. Providers
+			don't share an error taxonomy — the only universal signal is the message
+			text, so the honest solution is a curated, commented, growing list.
+			Look at those issue numbers: <code>#733</code>, <code>#3317</code>,
+			<code>#4433</code>, <code>#6019</code> — each pattern is a scar with a
+			paper trail. This file is institutional memory in executable form.
+		</p>
+		<p>
+			Two classifications deserve a second look. <strong>"stream ended before
+			message_stop"</strong>: remember the Anthropic adapter tracking
+			<code>sawMessageEnd</code>? A connection that dies mid-generation
+			surfaces as this error — and it's retryable, because the death was the
+			network's, not your request's. And <strong>"billing"</strong> as
+			non-retryable: an agent that auto-retried a billing failure in a loop
+			would hammer a dead account forever. The <em>expensive</em> mistakes sit
+			on the never-retry list.
+		</p>
+
+		<div class="callout note">
+			<span class="callout-label">Note · where the policy lives</span>
+			<p>
+				Upstairs, the coding agent wraps its stream function with the policy:
+				on a failed message, first check context overflow (a different
+				problem with a different cure — compaction), then consult this
+				classifier, then retry with backoff while telling you it's doing so
+				— that "Retrying in 8s (attempt 2/5)…" line in pi's footer. Same
+				classifier, any policy. You'll see the wiring in lesson 6.2.
+			</p>
+		</div>
+
+		<aside class="concept" data-kind="eng">
+			<p class="concept-label">Engineering · The retry discipline</p>
+			<p>
+				Three rules, all visible in this design. <strong>Classify before you
+				retry</strong> — blind retries amplify outages and drain wallets;
+				the transient/permanent split is the load-bearing decision.
+				<strong>Back off exponentially</strong> — wait 1s, 2s, 4s… so a
+				thousand failing clients don't synchronize into a stampede (the
+				policy layer's job here). <strong>Keep the budget visible</strong> —
+				retries hide problems; pi surfaces each attempt in the UI rather
+				than silently stalling. And a fourth, implicit: retrying is only
+				safe because a failed assistant turn is <em>restartable</em> — the
+				conversation state it consumed is still in memory, unchanged. Know
+				what your system can replay before you replay it.
+			</p>
+		</aside>
+
+		<h2>What you now know</h2>
+		<p>
+			Failure handling splits into a humble classifier (two commented regexes,
+			each line a healed wound) and caller-owned policy. Next lesson stays in
+			the trenches: what to do when the model's own output is broken JSON.
+		</p>
+	</article>
+	<script src="../manifest.js"></script>
+	<script src="../assets/vendor/highlight.min.js"></script>
+	<script src="../assets/js/app.js" defer></script>
+</body>
+</html>

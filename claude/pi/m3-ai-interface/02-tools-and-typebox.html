@@ -1,0 +1,172 @@
+<!doctype html>
+<html lang="en">
+<head>
+	<meta charset="utf-8">
+	<meta name="viewport" content="width=device-width, initial-scale=1">
+	<title>Tools and TypeBox · pi · Codebase Academy</title>
+	<link rel="stylesheet" href="../assets/css/site.css">
+</head>
+<body>
+	<article class="lesson">
+		<h1>Tools and TypeBox</h1>
+		<p class="lede">
+			A tool definition has to satisfy three different consumers: the TypeScript
+			compiler, a runtime validator, and a language model reading JSON Schema.
+			pi makes one definition serve all three. This lesson unpacks the trick —
+			and the <code>Context</code> type that carries everything to the wire.
+		</p>
+
+		<h2>The Tool type is suspiciously small</h2>
+		<figure class="code">
+			<figcaption><span>packages/ai/src/types.ts</span><span class="lines">Tool and Context</span></figcaption>
+			<pre><code class="language-typescript">import type { TSchema } from "typebox";
+
+export interface Tool&lt;TParameters extends TSchema = TSchema&gt; {
+	name: string;
+	description: string;
+	parameters: TParameters;
+}
+
+export interface Context {
+	systemPrompt?: string;
+	messages: Message[];
+	tools?: Tool[];
+}</code></pre>
+		</figure>
+		<p>
+			Name, description, parameters — that's a tool, as far as <code>pi-ai</code>
+			is concerned. No <code>execute</code> function! At this layer a tool is
+			only a <em>description sent to the model</em>; executing is the agent
+			layer's business (Module 5 adds <code>AgentTool</code> with the
+			<code>execute</code> method). The layering from Module 1 again, visible
+			in a type.
+		</p>
+		<p>
+			And there's <code>Context</code> — the entire request, the exact
+			three-field object you watched <code>streamAssistantResponse</code> build
+			in lesson 2.4. Everything a model ever learns arrives through one of
+			these three fields.
+		</p>
+
+		<h2>The interesting part: <code>parameters</code></h2>
+		<p>
+			The parameters field holds a <strong>TypeBox schema</strong>. Recall the
+			<code>read</code> tool's, from lesson 2.5:
+		</p>
+		<figure class="code">
+			<figcaption><span>packages/coding-agent/src/core/tools/read.ts</span><span class="lines">lines 20–26</span></figcaption>
+			<pre><code class="language-typescript">const readSchema = Type.Object({
+	path: Type.String({ description: "Path to the file to read (relative or absolute)" }),
+	offset: Type.Optional(Type.Number({ description: "Line number to start reading from (1-indexed)" })),
+	limit: Type.Optional(Type.Number({ description: "Maximum number of lines to read" })),
+});
+
+export type ReadToolInput = Static&lt;typeof readSchema&gt;;</code></pre>
+		</figure>
+		<p>This one declaration is doing three jobs simultaneously:</p>
+		<ul>
+			<li>
+				<strong>For the model:</strong> <code>readSchema</code> is a runtime
+				object that serializes to standard JSON Schema —
+				<code>{"type":"object","properties":{"path":{"type":"string","description":"Path to…"}}}</code> —
+				which is exactly what provider APIs expect in their tools field. Even
+				the <code>description</code> strings are prompt engineering: they're
+				the model's documentation for each parameter.
+			</li>
+			<li>
+				<strong>For the validator:</strong> when a tool call comes back, pi
+				checks its <code>arguments</code> against this same object
+				(<code>validateToolArguments</code>, called inside the agent loop) —
+				catching the model inventing parameters or passing a string where a
+				number belongs, <em>before</em> any tool code runs.
+			</li>
+			<li>
+				<strong>For the compiler:</strong> the last line is the magic.
+				<code>Static&lt;typeof readSchema&gt;</code> asks TypeScript to compute,
+				at compile time, the type that the schema describes:
+				<code>{ path: string; offset?: number; limit?: number }</code>. The
+				tool's <code>execute</code> function is typed with it, so schema and
+				implementation can never drift apart — change one, and the other stops
+				compiling.
+			</li>
+		</ul>
+
+		<aside class="concept" data-kind="ts">
+			<p class="concept-label">TypeScript · TypeBox ≈ pydantic (and generics)</p>
+			<p>
+				Remember that TypeScript types are <em>erased</em> at runtime (lesson
+				1.3) — so they can't validate network data. TypeBox fills the gap from
+				the other direction: you build a <em>value</em> (a JSON Schema object)
+				and derive the static type from it. Python's pydantic is the same
+				bargain reversed — there you write a class and derive the schema.
+				One source of truth, both worlds served.
+			</p>
+			<p>
+				This is also your first proper look at <strong>generics</strong>.
+				<code>Tool&lt;TParameters extends TSchema&gt;</code> is
+				<code>Generic[T]</code> with a constraint: any particular tool can be
+				precise (<code>Tool&lt;typeof readSchema&gt;</code>), while code that
+				handles "any tool" writes plain <code>Tool</code> and gets the default.
+				The <code>extends</code> clause means "T must at least be a schema" —
+				Python's <code>TypeVar("T", bound=TSchema)</code>. You'll see this
+				pattern constantly: a container type, one type parameter, a
+				constraint.
+			</p>
+		</aside>
+
+		<h2>What the model actually receives</h2>
+		<p>Assembling the pieces — here's the <code>tools</code> section of a real request body, as it crosses the wire to Anthropic:</p>
+		<figure class="code">
+			<figcaption><span>on the wire</span><span class="lines">tools field of a request, abridged</span></figcaption>
+			<pre><code class="language-json">"tools": [
+	{
+		"name": "read",
+		"description": "Read the contents of a file. ...",
+		"input_schema": {
+			"type": "object",
+			"properties": {
+				"path":   { "type": "string", "description": "Path to the file to read (relative or absolute)" },
+				"offset": { "type": "number", "description": "Line number to start reading from (1-indexed)" },
+				"limit":  { "type": "number", "description": "Maximum number of lines to read" }
+			},
+			"required": ["path"]
+		}
+	},
+	{ "name": "bash", "description": "Execute a bash command...", "input_schema": { "...": "..." } },
+	{ "name": "edit", "..." : "..." },
+	{ "name": "write", "..." : "..." }
+]</code></pre>
+		</figure>
+		<p>
+			Nothing mystical: the tool "API" a model sees is a list of names,
+			descriptions, and JSON Schemas, resent with <em>every single request</em>
+			like everything else in the stateless protocol. (Anthropic calls the
+			field <code>input_schema</code>; OpenAI says <code>parameters</code> —
+			dialect differences the adapters smooth over in Module 4.)
+		</p>
+
+		<div class="callout note">
+			<span class="callout-label">Note · descriptions are behavior</span>
+			<p>
+				Because the model chooses tools by reading these descriptions, editing
+				a description <em>changes the agent's behavior</em> as surely as
+				editing code. When pi's maintainers tune when the model reaches for
+				<code>grep</code> versus <code>read</code>, they're often editing
+				prose inside <code>Type.String({ description: ... })</code>. Prompt
+				engineering hides in type definitions.
+			</p>
+		</div>
+
+		<h2>What you now know</h2>
+		<p>
+			A tool is a named, described schema; TypeBox lets one schema feed the
+			compiler, the validator, and the model; and <code>Context</code> —
+			system prompt, messages, tools — is the entire interface to every LLM on
+			earth. Next lesson: where the 1,042 models and their price tags live.
+		</p>
+	</article>
+	<script src="../manifest.js"></script>
+	<script src="../assets/vendor/highlight.min.js"></script>
+	<script src="../assets/js/app.js" defer></script>
+</body>
+</html>

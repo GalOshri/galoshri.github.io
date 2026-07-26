@@ -1,0 +1,131 @@
+<!doctype html>
+<html lang="en">
+<head>
+	<meta charset="utf-8">
+	<meta name="viewport" content="width=device-width, initial-scale=1">
+	<title>Project context: AGENTS.md · pi · Codebase Academy</title>
+	<link rel="stylesheet" href="../assets/css/site.css">
+</head>
+<body>
+	<article class="lesson">
+		<h1>Project context: AGENTS.md</h1>
+		<p class="lede">
+			In lesson 1.5 you read pi's own AGENTS.md as a constitution. Now the
+			mechanism: how a markdown file in your repo becomes standing orders in
+			the model's head — the closing of the loop where a codebase instructs
+			the agents that work on it.
+		</p>
+
+		<h2>The discovery walk</h2>
+		<figure class="code">
+			<figcaption><span>packages/coding-agent/src/core/resource-loader.ts</span><span class="lines">loadProjectContextFiles, abridged</span></figcaption>
+			<pre><code class="language-typescript">function loadContextFileFromDir(dir: string): { path: string; content: string } | null {
+	const candidates = ["AGENTS.md", "AGENTS.MD", "CLAUDE.md", "CLAUDE.MD"];
+	for (const filename of candidates) {
+		const filePath = join(dir, filename);
+		if (existsSync(filePath)) {
+			return { path: filePath, content: readFileSync(filePath, "utf-8") };
+		}
+	}
+	return null;
+}
+
+export function loadProjectContextFiles(options: { cwd: string; agentDir: string }) {
+	// 1. global: ~/.pi/agent/AGENTS.md — your personal, cross-project rules
+	const globalContext = loadContextFileFromDir(resolvedAgentDir);
+
+	// 2. walk cwd's ancestors up to the filesystem root...
+	let currentDir = resolvedCwd;
+	while (true) {
+		const contextFile = loadContextFileFromDir(currentDir);
+		if (contextFile &amp;&amp; !seenPaths.has(contextFile.path)) {
+			ancestorContextFiles.unshift(contextFile);   // note: unshift — outermost first
+		}
+		if (currentDir === root) break;
+		currentDir = resolve(currentDir, "..");
+	}
+	// result: [global, repo-root, ..., cwd] — general → specific
+}</code></pre>
+		</figure>
+		<p>Three design choices in thirty lines:</p>
+		<ul>
+			<li>
+				<strong>The candidate list is diplomacy.</strong> <code>AGENTS.md</code>
+				is the emerging cross-tool convention; <code>CLAUDE.md</code> is
+				Claude Code's older house name. pi reads both, first match per
+				directory — your repo shouldn't need one rules file per AI vendor.
+			</li>
+			<li>
+				<strong>The walk goes all the way up.</strong> Run pi in
+				<code>~/work/monorepo/packages/api/</code> and it collects context
+				from <code>packages/api/</code>, the monorepo root, and
+				anything between — plus your global file. Nested rules for nested
+				scopes, exactly like <code>.gitignore</code> layering.
+			</li>
+			<li>
+				<strong><code>unshift</code> sets the precedence story.</strong>
+				Files are assembled outermost-first: global rules, then repo-wide,
+				then most-specific-directory <em>last</em> — and in prompt-land,
+				later text tends to win when instructions conflict. The most local
+				authority speaks last.
+			</li>
+		</ul>
+
+		<h2>Delivery: wrapped and labeled</h2>
+		<p>From last lesson's assembly, each file lands in the system prompt as:</p>
+		<figure class="code">
+			<figcaption><span>packages/coding-agent/src/core/system-prompt.ts</span><span class="lines">the wrapping</span></figcaption>
+			<pre><code class="language-typescript">prompt += "\n\n&lt;project_context&gt;\n\n";
+prompt += "Project-specific instructions and guidelines:\n\n";
+for (const { path: filePath, content } of contextFiles) {
+	prompt += `&lt;project_instructions path="${filePath}"&gt;\n${content}\n&lt;/project_instructions&gt;\n\n`;
+}
+prompt += "&lt;/project_context&gt;\n";</code></pre>
+		</figure>
+		<p>
+			The XML-ish tags aren't parsed by anything — they're for the
+			<em>model</em>, which handles delimited blocks far more reliably than
+			undifferentiated prose (models are trained on mountains of markup;
+			clear fences reduce instruction-bleeding between sections). The
+			<code>path</code> attribute means the model can even tell a user
+			<em>which</em> file imposed a rule.
+		</p>
+
+		<h2>What goes in one (and what shouldn't)</h2>
+		<p>
+			Having read pi's own AGENTS.md, you know the genre: build commands,
+			style rules, "never do X" tripwires, test invocations, commit
+			etiquette. The economics from lesson 6.4 apply — every line rides in
+			<em>every</em> request, forever. So the craft is ruthless brevity:
+			what must the agent <em>always</em> know, versus what it can
+			<code>read</code> on demand? (pi's own file points at deeper docs
+			rather than inlining them — and the skills system next lesson is the
+			formalization of "on demand.")
+		</p>
+
+		<div class="callout note">
+			<span class="callout-label">Note · the loop, closed</span>
+			<p>
+				Savor the recursion you can now fully explain: pi's repo contains an
+				AGENTS.md → pi (run in that repo) injects it into its own system
+				prompt → the model edits pi's source under those rules → including,
+				sometimes, editing AGENTS.md itself. A codebase that documents
+				itself <em>to</em> the agents that maintain it, using the mechanism
+				it implements. Every layer of that sentence is code you've read.
+			</p>
+		</div>
+
+		<h2>What you now know</h2>
+		<p>
+			Project context = a candidate-list walk from global to cwd, assembled
+			general-to-specific, fenced in labeled tags inside the system prompt.
+			One lesson left in the module: the other text-injection systems —
+			skills, prompt templates, and slash commands — and why they're really
+			one idea.
+		</p>
+	</article>
+	<script src="../manifest.js"></script>
+	<script src="../assets/vendor/highlight.min.js"></script>
+	<script src="../assets/js/app.js" defer></script>
+</body>
+</html>

@@ -1,0 +1,116 @@
+<!doctype html>
+<html lang="en">
+<head>
+	<meta charset="utf-8">
+	<meta name="viewport" content="width=device-width, initial-scale=1">
+	<title>Skills, templates, slash commands · pi · Codebase Academy</title>
+	<link rel="stylesheet" href="../assets/css/site.css">
+</head>
+<body>
+	<article class="lesson">
+		<h1>Skills, templates, slash commands</h1>
+		<p class="lede">
+			Three features that sound distinct — skills, prompt templates, slash
+			commands — and turn out to be variations on a single move:
+			<strong>getting the right text into the context at the right
+			moment</strong>. Seeing through them completes your model of how agents
+			are actually steered.
+		</p>
+
+		<h2>Skills: knowledge the model fetches itself</h2>
+		<p>
+			A <strong>skill</strong> is a directory containing a
+			<code>SKILL.md</code> — markdown with a small frontmatter header
+			(<code>name</code>, <code>description</code>) followed by instructions:
+			how to release this project, how to write a migration, how to review a
+			PR. Discovered from <code>.pi/skills/</code> and the global dir, they
+			get advertised in the system prompt — but only as a <em>catalog</em>:
+			name and one-line description each. The full text stays on disk until
+			the model decides a skill is relevant and <code>read</code>s it —
+			with the tool from lesson 6.4, budgets and all.
+		</p>
+		<p>
+			That's the entire trick, and it's the context economy again: a fat
+			skill library costs a few lines per skill per request, not kilobytes.
+			<em>Advertise cheaply, load lazily</em> — the same shape as
+			<code>lazyApi</code> (3.6) and dynamic imports, applied to knowledge.
+			(pi's repo has a skill of its own: <code>.pi/skills/add-llm-provider.md</code>
+			teaches the agent how to add a provider to <code>packages/ai</code> —
+			institutional memory as loadable text.)
+		</p>
+
+		<h2>Prompt templates: parameterized messages</h2>
+		<p>
+			A <strong>prompt template</strong> is a markdown file in
+			<code>.pi/prompts/</code> whose body contains placeholders —
+			<code>$1</code>, <code>$2</code>, <code>$ARGUMENTS</code>. Typing
+			<code>/review-pr 4187</code> expands the template with your arguments
+			and sends the result <em>as your user message</em>. No model involvement
+			in the expansion — pure string substitution, like a shell alias for
+			prompts. Where a skill is knowledge the <em>model</em> pulls, a
+			template is phrasing <em>you</em> push.
+		</p>
+
+		<h2>Slash commands: the umbrella</h2>
+		<p>
+			You met the dispatcher in lesson 2.1 — the <code>onSubmit</code> chain.
+			The full picture: a command's <em>source</em> is one of three kinds,
+			and the type in the code says so directly —
+			<code>SlashCommandSource = "extension" | "prompt" | "skill"</code>,
+			layered over ~40 built-ins:
+		</p>
+		<table>
+			<thead><tr><th>Kind</th><th>Examples</th><th>What typing it does</th></tr></thead>
+			<tbody>
+				<tr><td>built-in</td><td><code>/model</code>, <code>/compact</code>, <code>/fork</code>, <code>/resume</code>, <code>/login</code></td><td>runs app code — never reaches the model</td></tr>
+				<tr><td>prompt template</td><td><code>/review-pr 4187</code></td><td>expands text → sends as your message</td></tr>
+				<tr><td>skill</td><td><code>/add-llm-provider</code></td><td>injects a skill invocation → model reads the skill</td></tr>
+				<tr><td>extension</td><td>anything a plugin registers</td><td>runs the extension's handler (Module 8)</td></tr>
+			</tbody>
+		</table>
+		<p>
+			One prefix, one autocomplete list, four escalating levels of machinery
+			behind it. Users never need to know which kind they're invoking —
+			a good CLI hides its own taxonomy.
+		</p>
+
+		<h2>The unifying picture</h2>
+		<figure class="diagram">
+			<div class="drow">
+				<div class="dbox"><span class="dbox-title">AGENTS.md</span><span class="dbox-sub">always in context<br>(system prompt)</span></div>
+				<div class="dbox"><span class="dbox-title">skills</span><span class="dbox-sub">catalog in context,<br>body loaded on demand</span></div>
+				<div class="dbox"><span class="dbox-title">templates</span><span class="dbox-sub">expanded into<br>your next message</span></div>
+				<div class="dbox"><span class="dbox-title">compaction summary</span><span class="dbox-sub">replaces old context</span></div>
+			</div>
+			<span class="darrow">↓ all of them are answers to one question ↓</span>
+			<div class="drow">
+				<div class="dbox accent"><span class="dbox-title">what text does the model see, and when?</span></div>
+			</div>
+			<figcaption class="dcaption">Module 7 in one diagram. "Context engineering" is this question, asked systematically.</figcaption>
+		</figure>
+		<p>
+			Different lifetimes, different payers, different triggers — but every
+			mechanism in this module manipulates the same thing: the token stream
+			the model reads. Once you see agents this way, new features become
+			predictable. "Memory"? Text injected from a store. "RAG"? Text
+			retrieved into context. "Personas"? System-prompt text. The
+			implementation patterns you've read — discovery walks, lazy loading,
+			frontmatter catalogs, budget-aware truncation — are the whole toolkit,
+			recombined.
+		</p>
+
+		<h2>Module 7, closed</h2>
+		<p>
+			The agent now has memory (sessions), history you can navigate
+			(branching), graceful forgetting (compaction), a constitution (system
+			prompt), local law (AGENTS.md), and loadable expertise (skills). What
+			it doesn't have yet is <em>your</em> code running inside it. Module 8
+			fixes that: the extension system — jiti, the ExtensionAPI, and three
+			real plugins read end to end.
+		</p>
+	</article>
+	<script src="../manifest.js"></script>
+	<script src="../assets/vendor/highlight.min.js"></script>
+	<script src="../assets/js/app.js" defer></script>
+</body>
+</html>

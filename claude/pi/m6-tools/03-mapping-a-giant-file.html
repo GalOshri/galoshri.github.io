@@ -1,0 +1,133 @@
+<!doctype html>
+<html lang="en">
+<head>
+	<meta charset="utf-8">
+	<meta name="viewport" content="width=device-width, initial-scale=1">
+	<title>Mapping a 3,000-line file · pi · Codebase Academy</title>
+	<link rel="stylesheet" href="../assets/css/site.css">
+</head>
+<body>
+	<article class="lesson">
+		<h1>Mapping a 3,000-line file</h1>
+		<p class="lede">
+			<code>agent-session.ts</code> is 3,175 lines. <code>interactive-mode.ts</code>
+			is 5,780. You cannot read files like these top to bottom — and
+			professionals don't. This lesson teaches the actual technique, using
+			<code>agent-session.ts</code> as the live specimen. It's the most
+			transferable lesson in the course.
+		</p>
+
+		<h2>Rule zero: big files are maps, not novels</h2>
+		<p>
+			A novel punishes skipping; a map rewards it. Your goal with a huge file
+			is never "read it" — it's to build a <em>mental index</em> good enough
+			to answer: what does this thing own, what can you ask it to do, and
+			where would <em>my</em> question live inside it? Three passes get you
+			there, none of them linear.
+		</p>
+
+		<h2>Pass 1: the skeleton (five minutes)</h2>
+		<p>
+			Collapse the file to its structure — an editor's outline panel, or just
+			searching for <code>private </code>, <code>public </code>, and method
+			names. For <code>AgentSession</code> the skeleton comes out like this:
+		</p>
+		<figure class="code">
+			<figcaption><span>core/agent-session.ts</span><span class="lines">the skeleton, reconstructed</span></figcaption>
+			<pre><code class="language-text">class AgentSession {
+	// ~30 private fields: agent, sessionManager, settingsManager,
+	//   extensionRunner, compaction state, retry state, cost totals ...
+
+	// LIFECYCLE      constructor, dispose, reload
+	// PROMPTING      prompt(), steer(), followUp(), abort()
+	// EVENT PLUMBING _handleAgentEvent()  ← subscribes to the Agent broadcast
+	// PERSISTENCE    appendMessage → sessionManager; model/thinking changes
+	// COMPACTION     _maybeAutoCompact(), compact()
+	// RETRY          _retryWithPolicy() around failed turns
+	// TREE OPS       fork(), navigateTree(), branch summaries
+	// TOOLS          setActiveTools(), _rebuildSystemPrompt()
+	// EXTENSIONS     _installAgentToolHooks() → beforeToolCall/afterToolCall
+	// GETTERS        state, usage totals, session info
+}</code></pre>
+		</figure>
+		<p>
+			Ten clusters. The file is big not because any idea is big but because
+			<em>many small responsibilities meet here</em> — which is exactly what
+			"central object of a product" means. (Is that a God object? Somewhat —
+			the maintainers accepted hub-ness at the seam between library and
+			product. Note the trade rather than judging it.)
+		</p>
+
+		<h2>Pass 2: follow one thread (fifteen minutes)</h2>
+		<p>
+			Pick a question you actually care about and trace only its thread,
+			ignoring everything else. Example: <em>"how does a message reach the
+			session file?"</em> Search for <code>subscribe</code> — find that the
+			constructor registers <code>_handleAgentEvent</code> with the Agent.
+			Inside it, a familiar switch on <code>event.type</code>; the
+			<code>message_end</code> case calls
+			<code>sessionManager.appendMessage(event.message)</code>. Done — that's
+			the lesson 2.7 mystery, grounded, and you touched maybe 60 of the 3,175
+			lines. Each thread you pull adds a district to your mental map; three
+			or four threads and the file feels navigable.
+		</p>
+
+		<h2>Pass 3: let the callers tell you what matters</h2>
+		<p>
+			Grep the codebase for <code>session.</code> — who calls what? You'll
+			find the interactive mode calls <code>prompt</code>, <code>abort</code>,
+			<code>fork</code>, tree navigation; the rpc mode calls nearly
+			everything (it's a remote-control surface); extensions reach it through
+			a facade. Caller frequency is a relevance ranking: the methods everyone
+			uses are the file's true API, whatever its 30 private fields suggest.
+		</p>
+
+		<aside class="concept" data-kind="eng">
+			<p class="concept-label">Engineering · Reading code is search, not scanning</p>
+			<p>
+				The uncomfortable truth about big codebases: nobody has read them.
+				Their maintainers navigate by <em>search and structure</em> —
+				outlines, go-to-definition, find-references, git blame — building
+				just-in-time understanding for each task and letting the rest stay
+				fog. Skill at "reading code" is mostly skill at <em>asking narrow
+				questions</em> and refusing to read what doesn't answer them.
+			</p>
+			<p>
+				The three passes generalize anywhere: <strong>skeleton</strong>
+				(what clusters exist), <strong>thread</strong> (trace one behavior
+				end to end), <strong>callers</strong> (what does the world actually
+				use). And a fourth for repos with history: <code>git log --follow</code>
+				on the file — commit messages narrate <em>why</em> it grew. This is
+				also, not coincidentally, how AI coding agents like pi read code:
+				grep, read a slice, follow a reference. The technique is the same
+				because the problem is the same — too much text, one question.
+			</p>
+		</aside>
+
+		<div class="callout note">
+			<span class="callout-label">Note · why not split the file?</span>
+			<p>
+				Reasonable question — and the team clearly knows how (they split
+				everything else). A hub file has real advantages: one place to
+				search, no artificial indirection, honest about its coupling.
+				Splitting a hub into ten files often just hides the hub. The
+				better metric than line count is <em>can a newcomer build the
+				skeleton quickly?</em> — and thanks to consistent naming and
+				clustering, here you can.
+			</p>
+		</div>
+
+		<h2>What you now know</h2>
+		<p>
+			Skeleton, thread, callers: three passes that turn any monster file into
+			a map — 3,175 lines into ten labeled districts and a handful of traced
+			routes. You'll use the technique immediately: the next three lessons
+			walk into the tools directory, where the files are mercifully small
+			but the details are sharp.
+		</p>
+	</article>
+	<script src="../manifest.js"></script>
+	<script src="../assets/vendor/highlight.min.js"></script>
+	<script src="../assets/js/app.js" defer></script>
+</body>
+</html>

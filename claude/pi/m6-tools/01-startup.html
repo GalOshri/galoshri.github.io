@@ -1,0 +1,117 @@
+<!doctype html>
+<html lang="en">
+<head>
+	<meta charset="utf-8">
+	<meta name="viewport" content="width=device-width, initial-scale=1">
+	<title>From `pi` to a running mode · pi · Codebase Academy</title>
+	<link rel="stylesheet" href="../assets/css/site.css">
+</head>
+<body>
+	<article class="lesson">
+		<h1>From <code>pi</code> to a running mode</h1>
+		<p class="lede">
+			Welcome to the product. <code>pi-coding-agent</code> is 51,000 lines —
+			by far the biggest package — because products are where all the
+			concerns live: settings, auth, trust, four different run modes. This
+			lesson follows the boot sequence from the moment you type
+			<code>pi</code>.
+		</p>
+
+		<h2>A thin entrance, a real hallway</h2>
+		<p>
+			The npm manifest maps the <code>pi</code> command to
+			<code class="path">dist/cli.js</code> — a 20-line stub whose only job is
+			to call <code>main()</code>. The real orchestration is
+			<code class="path">src/main.ts</code> (~850 lines), and it reads like a
+			checklist of everything a CLI product must do before any AI happens:
+		</p>
+		<figure class="diagram">
+			<div class="drow">
+				<div class="dbox"><span class="dbox-title">parse args</span><span class="dbox-sub">cli/args.ts</span></div>
+				<span class="darrow">→</span>
+				<div class="dbox"><span class="dbox-title">migrations</span><span class="dbox-sub">upgrade old settings/sessions</span></div>
+				<span class="darrow">→</span>
+				<div class="dbox"><span class="dbox-title">managers</span><span class="dbox-sub">Settings · Sessions · Auth · Models</span></div>
+			</div>
+			<span class="darrow">↓</span>
+			<div class="drow">
+				<div class="dbox"><span class="dbox-title">project trust</span><span class="dbox-sub">is this cwd allowed to run code?</span></div>
+				<span class="darrow">→</span>
+				<div class="dbox"><span class="dbox-title">load resources</span><span class="dbox-sub">extensions · skills · themes · AGENTS.md</span></div>
+				<span class="darrow">→</span>
+				<div class="dbox accent"><span class="dbox-title">dispatch mode</span><span class="dbox-sub">interactive · print · json · rpc</span></div>
+			</div>
+		</figure>
+		<p>
+			Two stops deserve comment. <strong>Migrations</strong>: pi versions move
+			fast, and old settings files and session formats must upgrade in place —
+			a product concern no tutorial ever mentions but every real CLI carries.
+			<strong>Project trust</strong>: pi refuses to load a directory's
+			extensions and run its commands until you've explicitly trusted that
+			directory once. Why? Because a malicious repo could ship a
+			<code>.pi/extensions/steal-keys.ts</code> that runs the moment you cd in
+			and launch pi. Cloning code must not equal executing it (Module 8
+			returns to this).
+		</p>
+
+		<h2>Four modes, one decision function</h2>
+		<figure class="code">
+			<figcaption><span>packages/coding-agent/src/main.ts</span><span class="lines">resolveAppMode, verbatim</span></figcaption>
+			<pre><code class="language-typescript">function resolveAppMode(parsed: Args, stdinIsTTY: boolean, stdoutIsTTY: boolean): AppMode {
+	if (parsed.mode === "rpc") {
+		return "rpc";
+	}
+	if (parsed.mode === "json") {
+		return "json";
+	}
+	if (parsed.print || !stdinIsTTY || !stdoutIsTTY) {
+		return "print";
+	}
+	return "interactive";
+}</code></pre>
+		</figure>
+		<p>The four personalities of the same agent:</p>
+		<table>
+			<thead><tr><th>Mode</th><th>Trigger</th><th>What it is</th></tr></thead>
+			<tbody>
+				<tr><td><strong>interactive</strong></td><td>default in a real terminal</td><td>the full TUI chat experience</td></tr>
+				<tr><td><strong>print</strong></td><td><code>-p</code>, or piped stdin/stdout</td><td>one prompt in, final answer out, exit — pi as a shell utility</td></tr>
+				<tr><td><strong>json</strong></td><td><code>--mode json</code></td><td>like print, but emits the full event stream as JSON lines</td></tr>
+				<tr><td><strong>rpc</strong></td><td><code>--mode rpc</code></td><td>a long-lived subprocess speaking a JSONL command protocol — pi as a component (Module 10)</td></tr>
+			</tbody>
+		</table>
+		<p>
+			The subtle line is <code>!stdinIsTTY || !stdoutIsTTY</code>: run
+			<code>git diff | pi -p "review this"</code> and pi notices its stdin is
+			a pipe, not a keyboard (a "TTY" — teletype — is Unix-speak for a real
+			terminal), and downgrades itself to a well-behaved filter. Respecting
+			pipes is what makes a CLI composable; it's the same check
+			<code>ls</code> uses to drop its colors when piped.
+		</p>
+
+		<div class="callout note">
+			<span class="callout-label">Note · one engine, four faces</span>
+			<p>
+				All four modes construct the <em>same</em> <code>AgentSession</code>
+				(next lesson) and subscribe to the <em>same</em> event broadcast.
+				Interactive renders events as UI; print discards all but the final
+				message; json serializes each event; rpc forwards them to a parent
+				process. The event-stream design from lesson 2.2 is what makes four
+				products out of one engine — each mode is just a different
+				subscriber.
+			</p>
+		</div>
+
+		<h2>What you now know</h2>
+		<p>
+			Startup is a pipeline — args, migrations, managers, trust, resources —
+			ending in a mode dispatch driven by how you invoked pi and whether it's
+			talking to a human or a pipe. Every path converges on one call:
+			<code>createAgentSession</code>. That's next.
+		</p>
+	</article>
+	<script src="../manifest.js"></script>
+	<script src="../assets/vendor/highlight.min.js"></script>
+	<script src="../assets/js/app.js" defer></script>
+</body>
+</html>

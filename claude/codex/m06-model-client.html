@@ -1,0 +1,432 @@
+<!doctype html>
+<html lang="en">
+<head>
+	<meta charset="utf-8">
+	<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+	<meta name="color-scheme" content="light dark">
+	<title>core/ — Talking to the Model · Codex Explainer</title>
+	<link rel="stylesheet" href="assets/css/site.css">
+</head>
+<body>
+	<article class="lesson" data-module="m06-model-client.html">
+		<h1>core/ — Talking to the Model</h1>
+		<p class="lede">
+			<code>client.rs</code> is 96&nbsp;KB — the largest single file in
+			<code>core</code>. All of it exists to turn "here is a conversation" into "here
+			is a stream of things the model decided", reliably, across providers, over a
+			network that fails. This module is where the abstraction meets the wire.
+		</p>
+
+		<section class="lesson-section" id="building-request" data-minutes="9">
+			<h2>Building the request</h2>
+
+			<p>
+				Two types split the work. <code>ModelClient</code> is long-lived and shared;
+				<code>ModelClientSession</code> is created per turn:
+			</p>
+
+			<figure class="code">
+				<figcaption><span>codex-rs/core/src/client.rs</span><span class="lines">the two types, fields elided</span></figcaption>
+				<pre><code class="language-rust">pub struct ModelClient { /* … */ }
+
+pub struct ModelClientSession { /* … */ }
+
+impl ModelClient {
+    pub fn new_session(&amp;self) -&gt; ModelClientSession { /* … */ }
+}</code></pre>
+			</figure>
+
+			<p>
+				Module&nbsp;3 saw the session being created at the top of <code>run_turn</code>,
+				with a comment explaining why the split exists:
+			</p>
+
+			<figure class="code">
+				<figcaption><span>codex-rs/core/src/session/turn.rs</span><span class="lines">run_turn, first statement</span></figcaption>
+				<pre><code class="language-rust">let mut client_session =
+    prewarmed_client_session.unwrap_or_else(|| sess.services.model_client.new_session());</code></pre>
+			</figure>
+
+			<p>
+				The session holds per-turn state that must persist <em>across retries within
+				one turn</em> — which transport it settled on, what the server said about the
+				model. <code>prewarmed_client_session</code> is an optimisation: the connection
+				can be opened during startup, before you have typed anything, so the first
+				token arrives sooner.
+			</p>
+
+			<p>The entry point is <code>stream</code>:</p>
+
+			<figure class="code">
+				<figcaption><span>codex-rs/core/src/client.rs</span><span class="lines">ModelClientSession::stream</span></figcaption>
+				<pre><code class="language-rust">pub async fn stream(
+    &amp;mut self,
+    prompt: &amp;Prompt,
+    model_info: &amp;ModelInfo,
+    session_telemetry: &amp;SessionTelemetry,
+    effort: Option&lt;ReasoningEffortConfig&gt;,
+    summary: ReasoningSummaryConfig,
+    service_tier: Option&lt;String&gt;,
+    responses_metadata: &amp;CodexResponsesMetadata,
+    inference_trace: &amp;InferenceTraceContext,
+) -&gt; Result&lt;ResponseStream&gt;</code></pre>
+			</figure>
+
+			<p>
+				Read the parameters as the anatomy of a model call. <code>prompt</code> is the
+				conversation. <code>model_info</code> is which model and what it can do.
+				<code>effort</code> and <code>summary</code> control reasoning — how hard to
+				think, and how much of that thinking to show you. <code>service_tier</code>
+				selects a latency/price tier. The last two are telemetry.
+			</p>
+
+			<h3>One wire API</h3>
+
+			<figure class="code">
+				<figcaption><span>codex-rs/model-provider-info/src/lib.rs</span><span class="lines">lines 57–61</span></figcaption>
+				<pre><code class="language-rust">pub enum WireApi {
+    /// The Responses API exposed by OpenAI at `/v1/responses`.
+    #[default]
+    Responses,
+}</code></pre>
+			</figure>
+
+			<p>
+				A one-variant enum is an unusual thing to find, and it tells a story: Codex used
+				to speak Chat Completions as well, and no longer does. The enum survives as a
+				seam — the dispatch site still matches on it, so adding a second wire format is
+				a local change rather than an archaeology project.
+			</p>
+
+			<aside class="concept" data-kind="llm">
+				<p class="concept-label">LLM · Responses vs Chat Completions</p>
+				<p>
+					Chat Completions is the familiar list of <code>{role, content}</code>
+					messages. The Responses API is item-based: the conversation is a sequence of
+					typed items — messages, reasoning, function calls, function outputs — which
+					is why <code>TurnItem</code> in Module&nbsp;4 looks the way it does. Crucially
+					it can carry <em>reasoning</em> items between turns, so a model's private
+					chain of thought survives a tool call instead of being thrown away. For an
+					agent that makes many calls per turn, that is the difference between
+					thinking once and re-thinking every time.
+				</p>
+			</aside>
+		</section>
+
+		<section class="lesson-section" id="streaming" data-minutes="9">
+			<h2>Streaming: SSE to events</h2>
+
+			<p>
+				<code>stream</code> returns a <code>ResponseStream</code>, which yields
+				<code>ResponseEvent</code>s. That enum is the wire protocol of a model call:
+			</p>
+
+			<figure class="code">
+				<figcaption><span>codex-rs/codex-api/src/common.rs</span><span class="lines">ResponseEvent, abridged</span></figcaption>
+				<pre><code class="language-rust">pub enum ResponseEvent {
+    Created,
+    OutputItemAdded(ResponseItem),
+    OutputItemDone(ResponseItem),
+    OutputTextDelta(String),
+    ToolCallInputDelta {
+        item_id: String,
+        call_id: Option&lt;String&gt;,
+        delta: String,
+    },
+    ReasoningSummaryDelta {
+        delta: String,
+        summary_index: i64,
+    },
+    Completed {
+        response_id: String,
+        token_usage: Option&lt;TokenUsage&gt;,
+        /// Did the model affirmatively end its turn? Some providers do not set
+        /// this, so we rely on fallback logic when this is `None`.
+        end_turn: Option&lt;bool&gt;,
+    },
+}</code></pre>
+			</figure>
+
+			<p>
+				Same <code>Added</code>/<code>Delta</code>/<code>Done</code> discipline as the
+				<code>EventMsg</code>s in Module&nbsp;4, one layer down. Note
+				<code>ToolCallInputDelta</code>: even the <em>arguments to a tool call</em>
+				stream in character by character, which is how a UI can show "running
+				<code>cargo test…</code>" before the model has finished typing the command.
+			</p>
+
+			<p>
+				The comment on <code>end_turn</code> is the most valuable line in the enum:
+			</p>
+
+			<blockquote>
+				Did the model affirmatively end its turn? Some providers do not set this, so we
+				rely on fallback logic when this is <code>None</code>.
+			</blockquote>
+
+			<p>
+				This is the origin of <code>needs_follow_up</code> from Module&nbsp;3's loop.
+				Ideally the model says "I'm done". When the provider doesn't report it, Codex
+				infers it — did the model request a tool? did it produce a message? — because
+				the loop must terminate either way.
+			</p>
+
+			<aside class="concept" data-kind="os">
+				<p class="concept-label">Wire · Server-sent events</p>
+				<p>
+					SSE is a one-way streaming format over ordinary HTTP: the server holds the
+					response open and writes <code>data: {...}</code> lines separated by blank
+					lines. No WebSocket handshake, no framing protocol — it survives proxies and
+					corporate networks that block everything else. Each line is a JSON chunk that
+					Codex parses into one <code>ResponseEvent</code>. That said, Codex
+					<em>also</em> supports a WebSocket transport for the Responses API, with an
+					explicit fallback.
+				</p>
+			</aside>
+
+			<figure class="code">
+				<figcaption><span>codex-rs/core/src/client.rs</span><span class="lines">inside stream: transport selection</span></figcaption>
+				<pre><code class="language-rust">let wire_api = self.client.state.provider.info().wire_api;
+match wire_api {
+    WireApi::Responses =&gt; {
+        if self.client.responses_websocket_enabled() {
+            match self.stream_responses_websocket(/* … */).await? {
+                WebsocketStreamOutcome::Stream(stream) =&gt; return Ok(stream),
+                WebsocketStreamOutcome::FallbackToHttp =&gt; {
+                    self.try_switch_fallback_transport(session_telemetry, model_info);
+                }
+            }
+        }
+        // … fall through to HTTP/SSE …</code></pre>
+			</figure>
+
+			<p>
+				Try the WebSocket; if it reports <code>FallbackToHttp</code>, record that
+				decision on the session and use SSE instead. Because the decision lives on
+				<code>ModelClientSession</code>, one failed handshake doesn't cause a retry
+				storm — the rest of the turn goes straight to HTTP. That is exactly the
+				per-turn state the type split exists to hold.
+			</p>
+		</section>
+
+		<section class="lesson-section" id="providers" data-minutes="7">
+			<h2>Providers: OpenAI, Ollama, LM Studio</h2>
+
+			<p>
+				Codex is not locked to OpenAI's servers. Three crates carry provider knowledge:
+				<code>model-provider-info</code> (what a provider is),
+				<code>model-provider</code> (talking to one), and
+				<code>models-manager</code> (which models exist and what they can do). There are
+				also dedicated crates for two local runtimes:
+				<code class="path">codex-rs/ollama</code> and
+				<code class="path">codex-rs/lmstudio</code>.
+			</p>
+
+			<p>
+				That is what makes running a local model possible: point Codex at an
+				OpenAI-compatible endpoint on <code>localhost</code> and the same
+				<code>WireApi::Responses</code> path applies.
+			</p>
+
+			<p>
+				<code>ModelInfo</code> is the type that keeps this honest. Module&nbsp;5 saw
+				<code>model_info.input_modalities</code> deciding whether images survive into
+				the prompt; the same struct carries the context window that compaction measures
+				against, and the <code>comp_hash</code> that <code>run_turn</code> watches for
+				changes. Capabilities are data, not assumptions.
+			</p>
+
+			<aside class="concept" data-kind="eng">
+				<p class="concept-label">Engineering · Capability data beats feature flags</p>
+				<p>
+					The naive way to support many models is <code>if model.starts_with("gpt-5")
+					{ ... }</code> scattered through the code. Codex instead loads a description
+					of each model — context window, modalities, whether it reasons — and
+					branches on <em>capabilities</em>. Supporting a new model becomes a data
+					change. You saw the same instinct in Module&nbsp;4's macro table: describe
+					the thing once, derive the behaviour.
+				</p>
+			</aside>
+		</section>
+
+		<section class="lesson-section" id="retries" data-minutes="8">
+			<h2>Retries, rate limits, and errors</h2>
+
+			<p>
+				Model APIs fail constantly — rate limits, timeouts, overloaded servers, streams
+				that die mid-sentence. The retry policy is four lines:
+			</p>
+
+			<figure class="code">
+				<figcaption><span>codex-rs/core/src/util.rs</span><span class="lines">lines 86–91</span></figcaption>
+				<pre><code class="language-rust">pub fn backoff(attempt: u64) -&gt; Duration {
+    let exp = BACKOFF_FACTOR.powi(attempt.saturating_sub(1) as i32);
+    let base = (INITIAL_DELAY_MS as f64 * exp) as u64;
+    let jitter = rand::rng().random_range(0.9..1.1);
+    Duration::from_millis((base as f64 * jitter) as u64)
+}</code></pre>
+			</figure>
+
+			<p>
+				Exponential backoff with jitter — wait longer after each failure, and multiply
+				by a random 0.9–1.1 so that a thousand clients knocked offline by the same
+				outage don't return in lockstep and knock the server over again.
+			</p>
+
+			<aside class="concept" data-kind="rust">
+				<p class="concept-label">Rust · <code>saturating_sub</code></p>
+				<p>
+					<code>attempt</code> is an unsigned integer, so <code>attempt - 1</code> when
+					<code>attempt</code> is <code>0</code> would underflow — a panic in debug
+					builds, a wrap to 18 quintillion in release. <code>saturating_sub</code>
+					stops at zero instead. Rust makes you choose explicitly:
+					<code>saturating_</code>, <code>checked_</code> (returns
+					<code>Option</code>), or <code>wrapping_</code>. Python's integers are
+					arbitrary-precision so the question never arises; here, picking the wrong one
+					is a real bug class.
+				</p>
+			</aside>
+
+			<p>
+				Retrying is not a single mechanism. There is a dedicated
+				<code class="path">codex-rs/core/src/responses_retry.rs</code>, and
+				<code>compact.rs</code> imports <code>backoff</code> too — summarisation is a
+				model call and can fail like any other. Meanwhile
+				<code>ResponseEvent::SafetyBuffering</code> and
+				<code>ModelVerifications</code> are non-error conditions the server can report
+				mid-stream that still need surfacing rather than retrying.
+			</p>
+
+			<p>
+				Two more variants exist purely to keep client and server in agreement:
+			</p>
+
+			<figure class="code">
+				<figcaption><span>codex-rs/codex-api/src/common.rs</span><span class="lines">the reconciliation variants</span></figcaption>
+				<pre><code class="language-rust">    /// Emitted when the server includes `OpenAI-Model` on the stream response.
+    /// This can differ from the requested model when backend safety routing applies.
+    ServerModel(String),
+
+    /// Emitted when `X-Reasoning-Included: true` is present on the response,
+    /// meaning the server already accounted for past reasoning tokens and the
+    /// client should not re-estimate them.
+    ServerReasoningIncluded(bool),</code></pre>
+			</figure>
+
+			<p>
+				You can ask for one model and be served another. And token accounting is a
+				negotiation: if the server counted reasoning tokens, the client must not count
+				them again, or every context-window calculation drifts. Module&nbsp;5's
+				<code>sess.set_server_reasoning_included(false)</code> at the start of a regular
+				turn is this flag being reset.
+			</p>
+		</section>
+
+		<section class="lesson-section" id="auth" data-minutes="8">
+			<h2>Auth: ChatGPT sign-in vs API key</h2>
+
+			<p>
+				Codex accepts several kinds of credential, and the enum documents each:
+			</p>
+
+			<figure class="code">
+				<figcaption><span>codex-rs/protocol/src/auth.rs</span><span class="lines">AuthMode, abridged</span></figcaption>
+				<pre><code class="language-rust">pub enum AuthMode {
+    /// OpenAI API key provided by the caller and stored by Codex.
+    ApiKey,
+    /// ChatGPT OAuth managed by Codex (tokens persisted and refreshed by Codex).
+    Chatgpt,
+    /// ChatGPT auth tokens supplied by an external host application.
+    #[serde(rename = "chatgptAuthTokens")]
+    ChatgptAuthTokens,
+    /// Codex backend auth supplied as request headers.
+    #[serde(rename = "headers")]
+    // …
+}</code></pre>
+			</figure>
+
+			<p>
+				The distinction between <code>Chatgpt</code> and
+				<code>ChatgptAuthTokens</code> is the interesting one, and it is a direct
+				consequence of Module&nbsp;1's four front doors. When you run
+				<code>codex login</code>, Codex owns the OAuth flow and refreshes tokens itself.
+				When Codex is embedded in a host application that is <em>already</em> signed in —
+				the desktop app, an IDE — that host supplies tokens and Codex must not try to
+				manage them. Same agent, two ownership models.
+			</p>
+
+			<p>
+				The machinery lives in <code class="path">codex-rs/login</code> (~11,000 lines)
+				and <code class="path">codex-rs/chatgpt</code>, with
+				<code class="path">codex-rs/keyring-store</code> for storing secrets in the OS
+				keychain rather than a plaintext file. <code>AuthManager</code> is handed out by
+				<code>ThreadManager</code>, so every thread in a process shares one credential
+				store and one refresh cycle.
+			</p>
+
+			<figure class="code">
+				<figcaption><span>codex-rs/core/src/client.rs</span><span class="lines">prewarming auth</span></figcaption>
+				<pre><code class="language-rust">pub(crate) async fn prewarm_auth(&amp;self) -&gt; Result&lt;()&gt; { /* … */ }</code></pre>
+			</figure>
+
+			<p>
+				Refreshing an expired token takes a network round trip. Doing it lazily means
+				your first message pays for it; <code>prewarm_auth</code> moves that cost to
+				startup, alongside <code>prewarm_websocket</code> and
+				<code>preconnect_websocket</code>. A recurring theme in this file: do the slow
+				thing before the user is waiting.
+			</p>
+
+			<div class="callout warn">
+				<span class="callout-label">Careful</span>
+				<p>
+					Which auth mode you use changes more than billing. Rate limits, available
+					models, and which service tiers you may request all differ between a ChatGPT
+					subscription and an API key. If you are reading this code to debug "why does
+					it work for me and not for them", <code>AuthMode</code> is the first thing to
+					check.
+				</p>
+			</div>
+
+			<details class="digression">
+				<summary>What is <code>responses-api-proxy</code> for?</summary>
+				<div class="digression-body">
+					<p>
+						Module&nbsp;1's subcommand list included a hidden
+						<code>ResponsesApiProxy</code>, and there is a
+						<code class="path">codex-rs/responses-api-proxy</code> crate. It lets a
+						process that is <em>not</em> Codex make Responses API calls through
+						Codex's credentials and network policy — useful when a sandboxed child
+						needs model access without being handed a raw key. It reappears in
+						Module&nbsp;8, because "the sandbox blocks the network, but this one
+						endpoint must work" is exactly the kind of hole that needs a guarded door
+						rather than an exception.
+					</p>
+				</div>
+			</details>
+
+			<h3>What you now know</h3>
+
+			<p>
+				<code>ModelClient</code> is shared and <code>ModelClientSession</code> is
+				per-turn so transport decisions survive retries. There is one wire API — the
+				item-based Responses API — behind an enum kept as a seam.
+				<code>ResponseEvent</code> streams everything including tool-call arguments,
+				and <code>end_turn</code> may be absent, which is why the agent loop has
+				fallback logic. Providers and model capabilities are data, so local models work
+				through the same path. Failures get exponentially backed off with jitter, and
+				the server can override your model choice and your token accounting. Auth has
+				four modes because Codex is sometimes the host and sometimes the guest.
+			</p>
+
+			<p>
+				The model has now told us it wants to run a command. Next: the tools that let
+				it.
+			</p>
+		</section>
+	</article>
+	<script src="manifest.js"></script>
+	<script src="assets/vendor/highlight.min.js"></script>
+	<script src="assets/js/app.js" defer></script>
+</body>
+</html>

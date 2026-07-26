@@ -1,0 +1,89 @@
+<!doctype html>
+<html lang="en">
+<head>
+	<meta charset="utf-8">
+	<meta name="viewport" content="width=device-width, initial-scale=1">
+	<title>How to use this course · pi · Codebase Academy</title>
+	<link rel="stylesheet" href="../assets/css/site.css">
+</head>
+<body>
+	<article class="lesson">
+		<h1>How to use this course</h1>
+		<p class="lede">
+			A four-minute orientation to the course's own machinery: what the colored
+			boxes mean, how deep each module goes, and what to do when something
+			doesn't stick.
+		</p>
+
+		<h2>Everything you need is on the page</h2>
+		<p>
+			Every lesson is self-contained. Real code appears as excerpts with a header
+			bar naming the file it came from — like
+			<code class="path">packages/agent/src/agent-loop.ts</code> — so you always
+			know the provenance, but you never <em>need</em> to open that file. Diagrams,
+			example messages, wire payloads: all embedded. The header paths become
+			useful the day you want to explore the source yourself (a copy lives at
+			<code class="path">~/Projects/pi</code>), and not before.
+		</p>
+
+		<h2>The colored boxes</h2>
+		<p>
+			New concepts arrive exactly when the code first needs them, in one of four
+			flavors — each explained from a Python programmer's point of view, and each
+			introduced only once:
+		</p>
+		<aside class="concept" data-kind="ts">
+			<p class="concept-label">TypeScript · language features</p>
+			<p>Blue boxes decode TypeScript: unions, generics, narrowing, and other things Python's type hints only gesture at.</p>
+		</aside>
+		<aside class="concept" data-kind="node">
+			<p class="concept-label">Node.js · runtime &amp; ecosystem</p>
+			<p>Green boxes cover the Node platform: modules, event emitters, child processes, promises — the <code>asyncio</code>-shaped parts.</p>
+		</aside>
+		<aside class="concept" data-kind="llm">
+			<p class="concept-label">LLM · how models are driven</p>
+			<p>Violet boxes explain the AI side: messages, tool calling, streaming, context windows, caching. No machine-learning math — this is the <em>engineering</em> interface to a model.</p>
+		</aside>
+		<aside class="concept" data-kind="eng">
+			<p class="concept-label">Engineering · timeless craft</p>
+			<p>Amber boxes are language-agnostic engineering: layering, append-only logs, adapters, test doubles. These transfer to every codebase you'll ever read.</p>
+		</aside>
+
+		<h2>Other furniture</h2>
+		<ul>
+			<li><strong>Walkthroughs</strong> — code broken into short segments with commentary between them, marked by a colored rail on the left. Read them top to bottom; the segments are one continuous piece of code.</li>
+			<li><strong>Digressions</strong> — collapsed "＋" sections. Optional depth; skip freely, nothing later depends on them.</li>
+			<li><strong>"Go deeper" callouts</strong> — gray boxes at the end of some lessons pointing at source files or official docs. Also entirely optional.</li>
+			<li><strong>Elisions</strong> — excerpts trim irrelevant lines and mark the cut with <code>// ...</code>. Anything unmarked is verbatim from the repository.</li>
+		</ul>
+
+		<h2>The shape of the journey</h2>
+		<p>
+			<strong>Module 2 is the keystone</strong> — it follows one message from
+			your keyboard through every layer and back to your screen, at low
+			resolution. Read it even if you read nothing else; every later module
+			answers questions Module 2 plants. After that, the course descends the
+			dependency stack: the LLM interface (3–4), the loop (5), the product
+			(6–8), the terminal machinery (9), and a short appendix (10). Modules
+			after 2 are largely independent of each other — if extensions excite you
+			more than wire protocols, jumping from 5 to 8 is legal.
+		</p>
+
+		<h2>Advice, briefly</h2>
+		<ul>
+			<li><strong>Read code slowly, once.</strong> One careful pass over an excerpt beats three skims. If a line resists, the surrounding prose almost certainly addresses it.</li>
+			<li><strong>Don't memorize.</strong> The goal is recognizing shapes — "ah, a discriminated union", "ah, an adapter" — not recalling names. Shapes recur; names don't.</li>
+			<li><strong>Two lessons a sitting</strong> is a good sustainable pace. The minutes-per-lesson figures in the sidebar are honest.</li>
+			<li><strong>Expect drift.</strong> pi moves fast; if you ever compare against the live repo and a line number is off, trust the concepts, not the coordinates.</li>
+		</ul>
+
+		<p>
+			That's the whole manual. On to the main event: one message, all the way
+			through the machine.
+		</p>
+	</article>
+	<script src="../manifest.js"></script>
+	<script src="../assets/vendor/highlight.min.js"></script>
+	<script src="../assets/js/app.js" defer></script>
+</body>
+</html>

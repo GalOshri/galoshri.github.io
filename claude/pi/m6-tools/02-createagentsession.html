@@ -1,0 +1,142 @@
+<!doctype html>
+<html lang="en">
+<head>
+	<meta charset="utf-8">
+	<meta name="viewport" content="width=device-width, initial-scale=1">
+	<title>createAgentSession: wiring it all together · pi · Codebase Academy</title>
+	<link rel="stylesheet" href="../assets/css/site.css">
+</head>
+<body>
+	<article class="lesson">
+		<h1>createAgentSession: wiring it all together</h1>
+		<p class="lede">
+			One function in <code class="path">core/sdk.ts</code> assembles the
+			product: it builds an <code>Agent</code> from Module 5, plugs every hook
+			with product behavior, and wraps the result in <code>AgentSession</code>.
+			Reading it is like seeing the whole course's wiring diagram executed.
+		</p>
+
+		<h2>Defaults with opinions</h2>
+		<figure class="code">
+			<figcaption><span>packages/coding-agent/src/core/sdk.ts</span><span class="lines">default tools</span></figcaption>
+			<pre><code class="language-typescript">const defaultActiveToolNames: ToolName[] = ["read", "bash", "edit", "write"];</code></pre>
+		</figure>
+		<p>
+			Seven tools exist (read, bash, edit, write, grep, find, ls) but only
+			four are active by default. Why exclude the search tools? Because
+			<code>bash</code> already covers them — the model can run
+			<code>grep</code> and <code>find</code> as commands — and every tool
+			definition costs context tokens and decision complexity. The dedicated
+			grep/find/ls tools exist for <em>restricted</em> setups (a read-only
+			reviewer agent with no bash). Tool selection is prompt engineering.
+		</p>
+
+		<h2>The Agent, fully dressed</h2>
+		<p>Now watch every abstraction from Modules 3–5 get its production binding:</p>
+		<figure class="code">
+			<figcaption><span>packages/coding-agent/src/core/sdk.ts</span><span class="lines">the Agent construction, abridged</span></figcaption>
+			<pre><code class="language-typescript">agent = new Agent({
+	initialState: { systemPrompt: "", model, thinkingLevel, tools: [] },
+
+	convertToLlm: convertToLlmWithBlockImages,
+
+	streamFn: async (model, context, options) =&gt; {
+		const auth = await modelRegistry.getApiKeyAndHeaders(model);
+		if (!auth.ok) throw new Error(auth.error);
+		const providerRetrySettings = settingsManager.getProviderRetrySettings();
+		// SDKs treat timeout=0 as 0ms (immediate timeout), not "no timeout".
+		// Use max int32 to effectively disable the timeout.
+		const effectiveTimeoutMs = httpIdleTimeoutMs === 0 ? 2147483647 : httpIdleTimeoutMs;
+		return streamSimple(model, context, {
+			...options,
+			apiKey: auth.apiKey,
+			timeoutMs,
+			maxRetries: options?.maxRetries ?? providerRetrySettings.maxRetries,
+			headers: mergeProviderAttributionHeaders(model, settingsManager, options?.sessionId, auth.headers, options?.headers),
+		});
+	},
+
+	onPayload: async (payload) =&gt; extensionRunner.emitBeforeProviderRequest(payload),
+	transformContext: async (messages) =&gt; extensionRunner.emitContext(messages),
+
+	sessionId: sessionManager.getSessionId(),
+	steeringMode: settingsManager.getSteeringMode(),
+	transport: settingsManager.getTransport(),
+});</code></pre>
+		</figure>
+		<p>Read it hook by hook, as a reunion:</p>
+		<ul>
+			<li>
+				<strong><code>streamFn</code></strong> — the loop's "how do I talk to
+				a model" function (lesson 2.4), now doing product work: resolve auth
+				fresh per call (OAuth tokens expire, lesson 4.7), apply the user's
+				retry and timeout settings, merge attribution headers. Note the
+				battle-scar comment about <code>timeout=0</code> — the kind of
+				knowledge only production teaches.
+			</li>
+			<li>
+				<strong><code>convertToLlm</code></strong> — the boundary from lesson
+				5.1, wrapped with a "block images" filter: if the user disables image
+				reading, images are stripped <em>at the conversion point</em>, even if
+				a tool smuggled one into the transcript. The narrowest point is where
+				you enforce policy — that's called defense in depth.
+			</li>
+			<li>
+				<strong><code>onPayload</code> / <code>transformContext</code></strong>
+				— both forward straight to the extension runner. Extensions literally
+				<em>are</em> loop hooks with a registration system (Module 8's whole
+				secret, revealed early).
+			</li>
+		</ul>
+
+		<h2>AgentSession: the product wrapper</h2>
+		<p>
+			The configured Agent then disappears inside <code>AgentSession</code>
+			(<code class="path">core/agent-session.ts</code>, 3,175 lines — next
+			lesson's subject in a different way). The session subscribes to the
+			Agent's broadcast and does product things with each event: append
+			messages to the JSONL file, refresh the cost totals, trigger
+			auto-compaction between turns, fan events out to extensions and to
+			whichever mode is running. It also owns the retry policy — lesson 4.4's
+			classifier finally meets its policy here — plus
+			<code>prompt()</code>/<code>abort()</code>/<code>fork()</code> and every
+			operation slash commands need.
+		</p>
+		<figure class="diagram">
+			<div class="drow">
+				<div class="dbox"><span class="dbox-title">mode (TUI / print / rpc)</span></div>
+				<span class="darrow">↔</span>
+				<div class="dbox accent"><span class="dbox-title">AgentSession</span><span class="dbox-sub">persistence · retries · compaction ·<br>extensions · cost · trust</span></div>
+				<span class="darrow">↔</span>
+				<div class="dbox"><span class="dbox-title">Agent + runLoop</span><span class="dbox-sub">Module 5, unchanged</span></div>
+			</div>
+			<figcaption class="dcaption">The library stays generic; the session is where pi becomes pi.</figcaption>
+		</figure>
+
+		<div class="callout note">
+			<span class="callout-label">Note · this function is also the public SDK</span>
+			<p>
+				<code>createAgentSession()</code> is exported: any Node program can
+				<code>import { createAgentSession } from "@earendil-works/pi-coding-agent"</code>
+				and embed the full coding agent — tools, sessions, extensions —
+				headlessly. The same wiring that boots the CLI is the library's
+				front door. Products that are also SDKs keep themselves honest;
+				there's no hidden magic only the CLI can do.
+			</p>
+		</div>
+
+		<h2>What you now know</h2>
+		<p>
+			The product is the library with every hook filled in: auth-aware
+			streaming, policy at the conversion boundary, extensions as hook
+			forwarding, and a 3,175-line session object orchestrating persistence
+			and policy around the untouched loop. About that 3,175-line file —
+			how do you even read something that big? Next lesson is a technique
+			lesson.
+		</p>
+	</article>
+	<script src="../manifest.js"></script>
+	<script src="../assets/vendor/highlight.min.js"></script>
+	<script src="../assets/js/app.js" defer></script>
+</body>
+</html>

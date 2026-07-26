@@ -1,0 +1,132 @@
+<!doctype html>
+<html lang="en">
+<head>
+	<meta charset="utf-8">
+	<meta name="viewport" content="width=device-width, initial-scale=1">
+	<title>Building the system prompt · pi · Codebase Academy</title>
+	<link rel="stylesheet" href="../assets/css/site.css">
+</head>
+<body>
+	<article class="lesson">
+		<h1>Building the system prompt</h1>
+		<p class="lede">
+			The system prompt is the agent's constitution — standing instructions
+			the model reads before every single turn. pi's is not a mystical
+			incantation; it's assembled by an ordinary function from parts you
+			already know. Reading it demystifies a whole genre of AI folklore.
+		</p>
+
+		<h2>The real text</h2>
+		<figure class="code">
+			<figcaption><span>packages/coding-agent/src/core/system-prompt.ts</span><span class="lines">buildSystemPrompt core, verbatim</span></figcaption>
+			<pre><code class="language-typescript">let prompt = `You are an expert coding assistant operating inside pi, a coding agent harness. You help users by reading files, executing commands, editing code, and writing new files.
+
+Available tools:
+${toolsList}
+
+In addition to the tools above, you may have access to other custom tools depending on the project.
+
+Guidelines:
+${guidelines}
+
+Pi documentation (read only when the user asks about pi itself, its SDK, extensions, themes, skills, or TUI):
+- Main documentation: ${readmePath}
+- Additional docs: ${docsPath}
+- Examples: ${examplesPath} (extensions, custom tools, SDK)
+- ...`;</code></pre>
+		</figure>
+		<p>
+			That's it — a template literal. Note the register: plain, imperative,
+			terse. Guidelines include entries as mundane as "Be concise in your
+			responses" and "Show file paths clearly when working with files."
+			System prompts are configuration written in English, and good ones
+			read like good documentation, not spells.
+		</p>
+		<p>
+			The documentation section is pi's famous self-awareness trick: it tells
+			the model where pi's <em>own docs and examples live on disk</em>. Ask pi
+			"how do I write an extension?" and the model uses the <code>read</code>
+			tool on pi's bundled markdown — the "ask the agent to explain itself"
+			feature is three lines of prompt plus the tools you already understand.
+		</p>
+
+		<h2>Assembled, not written</h2>
+		<p>The function stacks sections, each from a subsystem you've met:</p>
+		<figure class="diagram">
+			<div class="drow">
+				<div class="dbox"><span class="dbox-title">identity + tool list</span><span class="dbox-sub">from active tools' promptSnippets (6.7)</span></div>
+				<span class="darrow">+</span>
+				<div class="dbox"><span class="dbox-title">guidelines</span><span class="dbox-sub">built-ins + per-tool promptGuidelines</span></div>
+				<span class="darrow">+</span>
+				<div class="dbox"><span class="dbox-title">append section</span><span class="dbox-sub">--append-system-prompt / APPEND_SYSTEM.md</span></div>
+			</div>
+			<div class="drow">
+				<span class="darrow">+</span>
+				<div class="dbox accent"><span class="dbox-title">&lt;project_context&gt;</span><span class="dbox-sub">AGENTS.md files (next lesson)</span></div>
+				<span class="darrow">+</span>
+				<div class="dbox"><span class="dbox-title">skills list</span><span class="dbox-sub">lesson 7.6</span></div>
+				<span class="darrow">+</span>
+				<div class="dbox"><span class="dbox-title">date + cwd</span><span class="dbox-sub">the changing tail</span></div>
+			</div>
+		</figure>
+		<p>Three consequences of the assembly design:</p>
+		<ul>
+			<li>
+				<strong>The prompt tracks the tools.</strong> Only <em>active</em>
+				tools contribute their snippets — and when active tools change
+				mid-session, <code>AgentSession._rebuildSystemPrompt()</code>
+				regenerates the whole prompt. The model is never told about a tool
+				it can't call.
+			</li>
+			<li>
+				<strong>Every layer of user gets a knob.</strong> Flags and
+				<code>.pi/SYSTEM.md</code> <em>replace</em> the prompt entirely
+				(for the brave); append variants <em>add</em> to it (for everyone
+				else); project context arrives via files in the repo. Configuration
+				surface mirrors confidence level.
+			</li>
+			<li>
+				<strong>Order is cache strategy.</strong> Recall exact-prefix
+				caching (4.6): the volatile parts — date, cwd — go <em>last</em>,
+				so the stable bulk of the prompt stays byte-identical across
+				sessions and cacheable across turns. Even prose placement is
+				economics.
+			</li>
+		</ul>
+
+		<aside class="concept" data-kind="llm">
+			<p class="concept-label">LLM · System prompts: programming in prose</p>
+			<p>
+				The system prompt occupies a privileged slot in every provider's
+				API — models are specifically trained to weight it above user
+				messages ("system" outranks "user" in the instruction hierarchy).
+				It's the right home for anything that should hold for the whole
+				session: identity, rules, environment facts, available capability.
+			</p>
+			<p>
+				Treat prompt text with code discipline, because it <em>is</em> code
+				with a probabilistic interpreter: version it (pi's lives in git like
+				everything else), test behavior changes when you edit it, keep it
+				modular (note how pi composes sections rather than maintaining one
+				sacred blob), and spend tokens like money — every word is billed on
+				every turn, cached or not. The mystique around "prompt engineering"
+				dissolves once you see it managed this way: it's just another
+				config layer, with unusually fuzzy semantics.
+			</p>
+		</aside>
+
+		<h2>What you now know</h2>
+		<p>
+			pi's system prompt is a composed document: identity, active-tool
+			manual, guidelines, user extensions, project context, skills, and a
+			deliberately volatile tail — rebuilt whenever capabilities change,
+			ordered for cache stability. The most interesting section is the one
+			we skipped: <code>&lt;project_context&gt;</code>, where your repo
+			talks back. Next lesson.
+		</p>
+	</article>
+	<script src="../manifest.js"></script>
+	<script src="../assets/vendor/highlight.min.js"></script>
+	<script src="../assets/js/app.js" defer></script>
+</body>
+</html>

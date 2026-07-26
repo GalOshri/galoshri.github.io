@@ -1,0 +1,138 @@
+<!doctype html>
+<html lang="en">
+<head>
+	<meta charset="utf-8">
+	<meta name="viewport" content="width=device-width, initial-scale=1">
+	<title>Tools: read, ls, grep, find · pi · Codebase Academy</title>
+	<link rel="stylesheet" href="../assets/css/site.css">
+</head>
+<body>
+	<article class="lesson">
+		<h1>Tools: read, ls, grep, find</h1>
+		<p class="lede">
+			The observation tools — the model's eyes. Their schemas are trivial;
+			their engineering is entirely about one scarce resource. A file is
+			megabytes; the model's attention is a fixed number of tokens; every
+			tool that <em>produces</em> output must therefore <em>budget</em>
+			output.
+		</p>
+
+		<aside class="concept" data-kind="llm">
+			<p class="concept-label">LLM · The context window as a scarce resource</p>
+			<p>
+				A model reads at most its <em>context window</em> — for Claude
+				Sonnet, 200k tokens, maybe 150k words — and that budget holds
+				<em>everything</em>: system prompt, conversation, every tool result
+				ever returned this session. Worse, the budget is shared over
+				<em>time</em>: a wasteful tool result doesn't just crowd this turn,
+				it gets re-sent (and re-billed, lesson 4.6) on every future turn
+				until compaction reaps it.
+			</p>
+			<p>
+				So agent tools obey an economy of attention: return the <em>least</em>
+				output that answers the question, tell the model what was withheld,
+				and give it knobs to ask for more. Watch all three principles appear
+				in code below. When people say "context engineering" is the real
+				craft of agents, this — plus system prompts and compaction — is what
+				they mean.
+			</p>
+		</aside>
+
+		<h2>The budget, made concrete</h2>
+		<figure class="code">
+			<figcaption><span>packages/coding-agent/src/core/tools/truncate.ts</span><span class="lines">lines 1–13</span></figcaption>
+			<pre><code class="language-typescript">/**
+ * Shared truncation utilities for tool outputs.
+ *
+ * Truncation is based on two independent limits - whichever is hit first wins:
+ * - Line limit (default: 2000 lines)
+ * - Byte limit (default: 50KB)
+ *
+ * Never returns partial lines (except bash tail truncation edge case).
+ */
+export const DEFAULT_MAX_LINES = 2000;
+export const DEFAULT_MAX_BYTES = 50 * 1024; // 50KB
+export const GREP_MAX_LINE_LENGTH = 500; // Max chars per grep match line</code></pre>
+		</figure>
+		<p>
+			One shared module, used by every tool. Two limits because they fail
+			differently: 2,000 short lines is fine reading, but 2,000 lines of
+			minified JavaScript would be a token bomb — the byte cap catches it.
+			"Never returns partial lines" matters more than it looks: a line cut
+			mid-token confuses models into hallucinating the rest. And grep gets a
+			<em>per-line</em> cap too — one match inside a bundle file could
+			otherwise be 200KB of line.
+		</p>
+		<p>
+			The <code>TruncationResult</code> type carries rich metadata —
+			<code>truncated</code>, <code>truncatedBy</code>, <code>totalLines</code>,
+			<code>outputLines</code> — because the cut must be <em>narrated</em>:
+			the model sees a note like "output truncated at 2000 of 8,344 lines;
+			use offset/limit to read more." An unexplained cut looks like the file
+			simply ends; an explained one is an invitation to page.
+		</p>
+
+		<h2>read: paging, images, and pluggable I/O</h2>
+		<p>Recall the schema (lesson 3.2): <code>path</code>, optional <code>offset</code>/<code>limit</code> — the paging knobs that pair with truncation. Around that trivial core, the real file (351 lines) layers production concerns you can now name:</p>
+		<ul>
+			<li><strong>Line numbers</strong> prefixed to output — so the model can later say "edit line 42" with confidence.</li>
+			<li><strong>Images:</strong> reading a .png returns actual <code>ImageContent</code> (resized to fit), and — checking <code>model.input</code> from the catalog, lesson 3.3 — swaps in a polite note when the current model is text-only.</li>
+			<li><strong>Pluggable operations</strong> — the pattern you keep meeting:</li>
+		</ul>
+		<figure class="code">
+			<figcaption><span>packages/coding-agent/src/core/tools/read.ts</span><span class="lines">lines 43–56</span></figcaption>
+			<pre><code class="language-typescript">/**
+ * Pluggable operations for the read tool.
+ * Override these to delegate file reading to remote systems (for example SSH).
+ */
+export interface ReadOperations {
+	readFile: (absolutePath: string) =&gt; Promise&lt;Buffer&gt;;
+	access: (absolutePath: string) =&gt; Promise&lt;void&gt;;
+	detectImageMimeType?: (absolutePath: string) =&gt; Promise&lt;string | null | undefined&gt;;
+}
+
+const defaultReadOperations: ReadOperations = {
+	readFile: (path) =&gt; fsReadFile(path),
+	access: (path) =&gt; fsAccess(path, constants.R_OK),
+	detectImageMimeType: detectSupportedImageMimeTypeFromFile,
+};</code></pre>
+		</figure>
+		<p>
+			Every tool has one of these — <code>BashOperations</code>,
+			<code>EditOperations</code>… Three async functions and the whole tool
+			works over SSH or in a sandbox. Small interface, huge leverage; it's
+			the ExecutionEnv idea (lesson 5.5) applied per-tool.
+		</p>
+
+		<h2>ls, grep, find: the supporting cast</h2>
+		<p>
+			Each is a few hundred lines of the same recipe — schema, operations
+			interface, truncation, a renderer for the TUI. Their specific virtues:
+			<strong>ls</strong> annotates directories and sizes;
+			<strong>grep</strong> wraps a regex search with match-context lines,
+			the 500-char line cap, and result counts; <strong>find</strong> does
+			glob matching with <code>.gitignore</code> awareness — because
+			<code>node_modules</code> would otherwise dominate every result list,
+			burning tokens on noise the model never wants. Even ignore-files are
+			context engineering.
+		</p>
+		<p>
+			Remember these three are <em>inactive</em> by default (lesson 6.2) —
+			bash covers them when present. Their careful existence is for the
+			locked-down configurations where bash is exactly what you've removed.
+		</p>
+
+		<h2>What you now know</h2>
+		<p>
+			Observation tools are budget enforcement wearing a schema: two-limit
+			truncation, narrated cuts, paging knobs, and pluggable I/O.
+			Next: the tool with the opposite problem — <code>bash</code> doesn't
+			read the world, it changes it, while its output streams live and its
+			processes need killing.
+		</p>
+	</article>
+	<script src="../manifest.js"></script>
+	<script src="../assets/vendor/highlight.min.js"></script>
+	<script src="../assets/js/app.js" defer></script>
+</body>
+</html>

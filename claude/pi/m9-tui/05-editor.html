@@ -1,0 +1,105 @@
+<!doctype html>
+<html lang="en">
+<head>
+	<meta charset="utf-8">
+	<meta name="viewport" content="width=device-width, initial-scale=1">
+	<title>The Editor · pi · Codebase Academy</title>
+	<link rel="stylesheet" href="../assets/css/site.css">
+</head>
+<body>
+	<article class="lesson">
+		<h1>The Editor</h1>
+		<p class="lede">
+			The box you type into is the largest component in the library — 2,300
+			lines. "It's just a text box" is the famous last words of UI
+			engineering; this lesson tours why, and harvests two beautifully
+			reusable sub-designs on the way.
+		</p>
+
+		<h2>Why a text box is never just a text box</h2>
+		<p>Inventory what typing into pi actually requires, every piece implemented from scratch on the <code>render(width) → string[]</code> contract:</p>
+		<ul>
+			<li><strong>Multi-line editing</strong> with word-wrap — and wrap-aware cursor movement: "up" means <em>visual</em> line up, which after wrapping is not the same as logical-line up. The editor maintains a wrap layout (<code>wordWrapLine</code>, chunks) and a <em>sticky preferred column</em>, so cursoring through short lines and back remembers where you were. Every editor you've ever liked does this; you notice only when one doesn't.</li>
+			<li><strong>Selection, kill ring, word navigation</strong> — Emacs-style <kbd>ctrl+k</kbd>/<kbd>ctrl+y</kbd> cut-and-recall (a <code>KillRing</code> class), <kbd>alt+arrow</kbd> word hops, all through the keybindings layer from last lesson.</li>
+			<li><strong>Paste as an atomic unit</strong> — bracketed-paste events (9.3) insert as one segment: one undo step, no per-character re-render, no interpreting pasted newlines as submissions.</li>
+			<li><strong>Autocomplete</strong> — the slash-command and file-path popup, debounced and cancellable (below).</li>
+			<li><strong>Submit vs. newline</strong> — <kbd>Enter</kbd> submits (the <code>onSubmit</code> you traced in lesson 2.1), <kbd>shift+enter</kbd> inserts a line break… where the terminal can even tell the difference, which is a Kitty-protocol gift (9.4).</li>
+		</ul>
+
+		<h2>Harvest #1: undo as snapshots</h2>
+		<figure class="code">
+			<figcaption><span>packages/tui/src/undo-stack.ts</span><span class="lines">verbatim, whole file (minus comments)</span></figcaption>
+			<pre><code class="language-typescript">export class UndoStack&lt;S&gt; {
+	private stack: S[] = [];
+
+	/** Push a deep clone of the given state onto the stack. */
+	push(state: S): void {
+		this.stack.push(structuredClone(state));
+	}
+
+	/** Pop and return the most recent snapshot, or undefined if empty. */
+	pop(): S | undefined {
+		return this.stack.pop();
+	}
+
+	clear(): void {
+		this.stack.length = 0;
+	}
+}</code></pre>
+		</figure>
+		<p>
+			Undo, the whole thing, in a class you can hold in one glance. The
+			editor pushes a snapshot of <code>EditorState</code> (text + cursor)
+			before each mutating operation; undo is <code>pop()</code>.
+			<code>structuredClone</code> (a built-in deep copy, like Python's
+			<code>copy.deepcopy</code>) makes snapshots immune to later mutation —
+			the comment's "clone-on-push" discipline. Compare the alternative:
+			command-pattern undo, where every operation implements an inverse.
+			That's cleverer, saves memory, and breeds subtle bugs; snapshots are
+			brute force that <em>cannot</em> be wrong. For editor-sized state,
+			brute force wins. Generic over <code>S</code>, naturally — lesson
+			3.2's pattern, smallest possible edition.
+		</p>
+
+		<h2>Harvest #2: cancellable async autocomplete</h2>
+		<p>
+			The autocomplete popup has a hidden race: you type
+			<code>src/co</code>, a filesystem scan starts; you type an
+			<code>m</code>, a new scan starts — and if the <em>old</em> scan
+			finishes last, stale results overwrite fresh ones. The editor's fix is
+			the idiom you learned in lesson 5.3, at UI scale: each lookup gets an
+			<code>AbortController</code>; the next keystroke aborts the previous
+			controller before starting its own; results check their signal before
+			touching the UI. Plus a debounce so a fast typist triggers one lookup,
+			not eight. <em>Abort the old, debounce the new, never trust a result
+			without checking its signal</em> — that trio solves every
+			type-ahead race you'll ever meet, in any language.
+		</p>
+
+		<h2>The component discipline holds</h2>
+		<p>
+			For all its internals, the Editor exposes exactly the interfaces
+			you already know: it's a <code>Component</code>
+			(<code>render(width)</code> returns its box, prompt, wrapped text,
+			and — when focused — the <code>CURSOR_MARKER</code> from 9.1) and a
+			<code>Focusable</code>; input arrives via <code>handleInput</code>;
+			the outside world sees <code>onSubmit</code> and a few setters.
+			2,300 lines of complexity, zero of them leaking into the contract.
+			That's the whole art of components, demonstrated at the hardest
+			difficulty setting the terminal offers.
+		</p>
+
+		<h2>What you now know</h2>
+		<p>
+			The editor = wrap-aware layout + sticky columns + snapshot undo +
+			kill ring + atomic paste + abortable autocomplete, all behind the
+			same four-member interface as a humble spinner. One component
+			remains — the one that renders the model's words: streaming
+			Markdown.
+		</p>
+	</article>
+	<script src="../manifest.js"></script>
+	<script src="../assets/vendor/highlight.min.js"></script>
+	<script src="../assets/js/app.js" defer></script>
+</body>
+</html>

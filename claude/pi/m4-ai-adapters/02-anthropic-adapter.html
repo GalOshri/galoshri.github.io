@@ -1,0 +1,251 @@
+<!doctype html>
+<html lang="en">
+<head>
+	<meta charset="utf-8">
+	<meta name="viewport" content="width=device-width, initial-scale=1">
+	<title>Deep dive: the Anthropic adapter · pi · Codebase Academy</title>
+	<link rel="stylesheet" href="../assets/css/site.css">
+</head>
+<body>
+	<article class="lesson">
+		<h1>Deep dive: the Anthropic adapter</h1>
+		<p class="lede">
+			1,239 lines that turn <code>Context</code> into HTTP and SSE bytes into
+			the event grammar. We'll walk the full round trip — request out, stream
+			in — through the cleanest of the nine adapters. This is the longest
+			lesson in the course; take it slowly.
+		</p>
+
+		<h2>Leg 1: building the request</h2>
+		<p>
+			The outbound half is translation-by-walking: convert each normalized
+			message into Anthropic's JSON dialect (their tool results live
+			<em>inside</em> user messages; thinking blocks need their signatures
+			reattached; images become base64 source objects), serialize the TypeBox
+			schemas into the <code>tools</code> array, map the thinking level to a
+			token budget, and POST it to <code>/v1/messages</code> with
+			<code>stream: true</code>. One production concern deserves a close-up —
+			cache markers:
+		</p>
+		<figure class="code">
+			<figcaption><span>packages/ai/src/api/anthropic-messages.ts</span><span class="lines">getCacheControl, verbatim</span></figcaption>
+			<pre><code class="language-typescript">function getCacheControl(
+	model: Model&lt;"anthropic-messages"&gt;,
+	cacheRetention?: CacheRetention,
+	env?: ProviderEnv,
+): { retention: CacheRetention; cacheControl?: CacheControlEphemeral } {
+	const retention = resolveCacheRetention(cacheRetention, env);
+	if (retention === "none") {
+		return { retention };
+	}
+	const ttl = retention === "long" && getAnthropicCompat(model).supportsLongCacheRetention ? "1h" : undefined;
+	return {
+		retention,
+		cacheControl: { type: "ephemeral", ...(ttl && { ttl }) },
+	};
+}</code></pre>
+		</figure>
+		<p>
+			The returned marker gets attached to the system prompt, the last tool
+			definition, and the last messages — telling Anthropic "remember
+			everything up to here." Why those positions, and what it saves, is
+			lesson 4.6's story; note for now that the adapter consults a
+			<em>compat flag</em> even here, because Anthropic-compatible resellers
+			don't all support the 1-hour tier.
+		</p>
+
+		<details class="digression">
+			<summary>The stealth-mode surprise: pi impersonates Claude Code</summary>
+			<div class="digression-body">
+				<p>
+					Right at the top of the file sits an unexpected table:
+				</p>
+				<figure class="code">
+					<figcaption><span>packages/ai/src/api/anthropic-messages.ts</span><span class="lines">lines 72–101, abridged</span></figcaption>
+					<pre><code class="language-typescript">// Stealth mode: Mimic Claude Code's tool naming exactly
+const claudeCodeVersion = "2.1.75";
+const claudeCodeTools = ["Read", "Write", "Edit", "Bash", "Grep", "Glob", /* ... */];
+const toClaudeCodeName = (name: string) =&gt; ccToolLookup.get(name.toLowerCase()) ?? name;</code></pre>
+				</figure>
+				<p>
+					When you log in with a Claude Pro/Max subscription (OAuth rather
+					than API key), the endpoint expects traffic that looks like
+					Anthropic's own Claude Code client. So pi renames its tools to
+					match Claude Code's canonical casing on the way out
+					(<code>read</code> → <code>Read</code>) and back on the way in.
+					You saw the return path in this module's SSE code:
+					<code>isOAuth ? fromClaudeCodeName(...)</code>. A vivid reminder
+					that adapters absorb <em>commercial</em> reality, not just
+					technical formats.
+				</p>
+			</div>
+		</details>
+
+		<h2>Leg 2: bytes to lines to events</h2>
+		<p>
+			The response arrives as an HTTP body that stays open for the whole
+			generation, dribbling <em>Server-Sent Events</em>. Raw, it looks like
+			this:
+		</p>
+		<figure class="code">
+			<figcaption><span>on the wire</span><span class="lines">SSE frames from Anthropic, abridged</span></figcaption>
+			<pre><code class="language-text">event: message_start
+data: {"type":"message_start","message":{"model":"claude-sonnet-4-5","usage":{"input_tokens":4520}}}
+
+event: content_block_start
+data: {"type":"content_block_start","index":0,"content_block":{"type":"text","text":""}}
+
+event: content_block_delta
+data: {"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"I'll take"}}
+
+event: content_block_delta
+data: {"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":" a look"}}
+
+event: message_stop
+data: {"type":"message_stop"}</code></pre>
+		</figure>
+
+		<aside class="concept" data-kind="node">
+			<p class="concept-label">Web · Server-Sent Events (SSE)</p>
+			<p>
+				SSE is the simplest streaming protocol imaginable: one long HTTP
+				response whose body is text, divided into frames by <em>blank
+				lines</em>; each frame has <code>event:</code> and <code>data:</code>
+				lines. No binary framing, no handshake, no library required —
+				<code>curl</code> can speak it. That simplicity is why every LLM
+				provider chose it over WebSockets for response streaming
+				(pi supports WebSocket transports for a couple of providers, but SSE
+				is the lingua franca).
+			</p>
+			<p>
+				The one genuine subtlety: <strong>the network doesn't respect your
+				framing</strong>. A TCP read may deliver half a frame, or three and
+				a half. Any SSE parser is therefore a buffering loop: append bytes,
+				extract complete lines, keep the remainder. Watch for exactly that
+				shape below.
+			</p>
+		</aside>
+
+		<div class="walkthrough">
+			<figure class="code">
+				<figcaption><span>packages/ai/src/api/anthropic-messages.ts</span><span class="lines">iterateSseMessages, abridged</span></figcaption>
+				<pre><code class="language-typescript">async function* iterateSseMessages(body: ReadableStream&lt;Uint8Array&gt;, signal?: AbortSignal) {
+	const reader = body.getReader();
+	const decoder = new TextDecoder();
+	const state: SseDecoderState = { event: null, data: [], raw: [] };
+	let buffer = "";
+
+	while (true) {
+		if (signal?.aborted) throw new Error("Request was aborted");
+
+		const { value, done } = await reader.read();
+		if (done) break;
+
+		buffer += decoder.decode(value, { stream: true });
+		let consumed = consumeLine(buffer);
+		while (consumed) {
+			buffer = consumed.rest;
+			const event = decodeSseLine(consumed.line, state);
+			if (event) yield event;
+			consumed = consumeLine(buffer);
+		}
+	}
+	// ...flush whatever remains in the buffer at end-of-stream
+}</code></pre>
+			</figure>
+			<p class="anno">
+				There's the buffering loop, as an <code>async function*</code> —
+				JavaScript's <code>yield</code>-based generator, made asynchronous
+				(you met the consuming side in lesson 2.4; this is the producing
+				side). <code>reader.read()</code> gives raw bytes; the
+				<code>TextDecoder</code> with <code>{stream: true}</code> even
+				handles a multi-byte UTF-8 character split across network chunks.
+				Complete lines are peeled off one at a time; partial ones wait in
+				<code>buffer</code> for the next chunk. Every streaming parser you
+				will ever write has this exact skeleton.
+			</p>
+			<figure class="code">
+				<figcaption><span class="lines">iterateAnthropicEvents, abridged</span></figcaption>
+				<pre><code class="language-typescript">for await (const sse of iterateSseMessages(response.body, signal)) {
+	if (sse.event === "error") throw new Error(sse.data);
+	if (!ANTHROPIC_MESSAGE_EVENTS.has(sse.event ?? "")) continue;
+
+	const event = parseJsonWithRepair&lt;RawMessageStreamEvent&gt;(sse.data);
+	if (event.type === "message_start") sawMessageStart = true;
+	else if (event.type === "message_stop") sawMessageEnd = true;
+	yield event;
+}</code></pre>
+			</figure>
+			<p class="anno">
+				Second stage of the pipeline: filter to known event names, JSON-parse
+				each frame (with the repair parser — even provider JSON isn't fully
+				trusted), and track whether the stream properly started and ended.
+				That bookkeeping matters: a connection that dies mid-generation
+				produces "stream ended before message_stop" — an error you'll meet
+				again in the retry lesson.
+			</p>
+		</div>
+
+		<h2>Leg 3: dialect to grammar</h2>
+		<p>
+			Stage three consumes those parsed provider events and speaks our union.
+			This is the heart of the adapter — Anthropic's block lifecycle mapping
+			one-to-one onto pi's:
+		</p>
+		<figure class="code">
+			<figcaption><span>packages/ai/src/api/anthropic-messages.ts</span><span class="lines">the translation switch, abridged</span></figcaption>
+			<pre><code class="language-typescript">} else if (event.type === "content_block_start") {
+	if (event.content_block.type === "text") {
+		const block: Block = { type: "text", text: "", index: event.index };
+		output.content.push(block);
+		stream.push({ type: "text_start", contentIndex: output.content.length - 1, partial: output });
+	} else if (event.content_block.type === "tool_use") {
+		const block: Block = {
+			type: "toolCall",
+			id: event.content_block.id,
+			name: isOAuth ? fromClaudeCodeName(event.content_block.name, context.tools) : event.content_block.name,
+			arguments: {},
+			partialJson: "",
+			index: event.index,
+		};
+		output.content.push(block);
+		stream.push({ type: "toolcall_start", contentIndex: output.content.length - 1, partial: output });
+	}
+	// ...thinking and redacted_thinking cases
+} else if (event.type === "content_block_delta") {
+	if (event.delta.type === "input_json_delta") {
+		const block = blocks[index];
+		block.partialJson += event.delta.partial_json;
+		block.arguments = parseStreamingJson(block.partialJson);
+		stream.push({ type: "toolcall_delta", contentIndex: index, delta: event.delta.partial_json, partial: output });
+	}
+	// ...text_delta, thinking_delta, signature_delta cases
+}</code></pre>
+		</figure>
+		<p>
+			Every mystery from earlier lessons resolves in these lines. The
+			<code>partial</code> snapshot on every event? It's <code>output</code> —
+			the adapter maintains the growing <code>AssistantMessage</code> itself
+			and pushes a reference along with each event. Tool arguments visible
+			while streaming? <code>partialJson</code> accumulates the fragments and
+			<code>parseStreamingJson</code> re-parses the incomplete JSON after
+			every delta. Redacted thinking, signatures, OAuth renaming — each is a
+			two-line case in this switch. And at <code>message_stop</code>: compute
+			usage via <code>calculateCost</code>, push <code>done</code>, settle the
+			stream you know from lesson 3.5.
+		</p>
+
+		<h2>What you now know</h2>
+		<p>
+			An adapter is three pipelined loops: build-and-send, bytes-to-frames,
+			frames-to-grammar — with the partial message maintained in the middle
+			and every quirk of one vendor quarantined inside one file. Now brace
+			yourself: next lesson is the adapter that has to please twenty vendors
+			at once.
+		</p>
+	</article>
+	<script src="../manifest.js"></script>
+	<script src="../assets/vendor/highlight.min.js"></script>
+	<script src="../assets/js/app.js" defer></script>
+</body>
+</html>

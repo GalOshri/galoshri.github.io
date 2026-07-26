@@ -1,0 +1,132 @@
+<!doctype html>
+<html lang="en">
+<head>
+	<meta charset="utf-8">
+	<meta name="viewport" content="width=device-width, initial-scale=1">
+	<title>Reading three real extensions · pi · Codebase Academy</title>
+	<link rel="stylesheet" href="../assets/css/site.css">
+</head>
+<body>
+	<article class="lesson">
+		<h1>Reading three real extensions</h1>
+		<p class="lede">
+			The repo ships ~60 example extensions — from permission gates to a
+			playable DOOM overlay. We read two closely and survey the zoo, because
+			each example is a different answer to "which hook, used how?"
+		</p>
+
+		<h2>1. permission-gate: the guard pattern</h2>
+		<figure class="code">
+			<figcaption><span>examples/extensions/permission-gate.ts</span><span class="lines">verbatim, whole file</span></figcaption>
+			<pre><code class="language-typescript">import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
+
+export default function (pi: ExtensionAPI) {
+	const dangerousPatterns = [/\brm\s+(-rf?|--recursive)/i, /\bsudo\b/i, /\b(chmod|chown)\b.*777/i];
+
+	pi.on("tool_call", async (event, ctx) =&gt; {
+		if (event.toolName !== "bash") return undefined;
+
+		const command = event.input.command as string;
+		const isDangerous = dangerousPatterns.some((p) =&gt; p.test(command));
+
+		if (isDangerous) {
+			if (!ctx.hasUI) {
+				// In non-interactive mode, block by default
+				return { block: true, reason: "Dangerous command blocked (no UI for confirmation)" };
+			}
+
+			const choice = await ctx.ui.select(`⚠️ Dangerous command:\n\n  ${command}\n\nAllow?`, ["Yes", "No"]);
+
+			if (choice !== "Yes") {
+				return { block: true, reason: "Blocked by user" };
+			}
+		}
+
+		return undefined;
+	});
+}</code></pre>
+		</figure>
+		<p>
+			Thirty lines, and it's a permission system. Trace the mechanics with
+			what you know: the <code>tool_call</code> event is the runner's fan-out
+			of <code>beforeToolCall</code> (5.3); returning
+			<code>{ block: true, reason }</code> becomes an error tool result the
+			<em>model</em> reads — so the model learns "Blocked by user" and adapts,
+			rather than crashing. Three details are professional-grade:
+			<code>return undefined</code> means "no opinion" (other extensions
+			still get their say); <code>ctx.hasUI</code> handles headless modes —
+			<em>fail closed</em> when nobody can approve; and the handler being
+			<code>async</code> means it can park the entire agent loop on a human
+			decision — the awaited-listener guarantee (5.4) making an interactive
+			veto possible at all.
+		</p>
+
+		<h2>2. git-checkpoint: the state-sync pattern</h2>
+		<figure class="code">
+			<figcaption><span>examples/extensions/git-checkpoint.ts</span><span class="lines">abridged</span></figcaption>
+			<pre><code class="language-typescript">export default function (pi: ExtensionAPI) {
+	const checkpoints = new Map&lt;string, string&gt;();
+
+	pi.on("turn_start", async () =&gt; {
+		// Create a git stash entry before LLM makes changes
+		const { stdout } = await pi.exec("git", ["stash", "create"]);
+		const ref = stdout.trim();
+		if (ref &amp;&amp; currentEntryId) checkpoints.set(currentEntryId, ref);
+	});
+
+	pi.on("session_before_fork", async (event, ctx) =&gt; {
+		const ref = checkpoints.get(event.entryId);
+		if (!ref) return;
+		const choice = await ctx.ui.select("Restore code state?", [
+			"Yes, restore code to that point",
+			"No, keep current code",
+		]);
+		if (choice?.startsWith("Yes")) {
+			await pi.exec("git", ["stash", "apply", ref]);
+			ctx.ui.notify("Code restored to checkpoint", "info");
+		}
+	});
+}</code></pre>
+		</figure>
+		<p>
+			This one fixes a real conceptual gap you can now articulate precisely:
+			Module 7's session tree time-travels the <em>conversation</em>, but not
+			your <em>files</em> — rewind three turns and the code still has all
+			three turns' edits. The extension pairs the two histories: at each
+			<code>turn_start</code> it snapshots the working tree
+			(<code>git stash create</code> makes a commit without touching
+			anything), keyed by session-entry id; on fork, it offers to restore
+			the matching snapshot. Conversation tree ↔ code tree, stitched by
+			forty lines and two hooks. This is the pattern for syncing <em>any</em>
+			external state — databases, running services, browser tabs — to the
+			agent's timeline.
+		</p>
+
+		<h2>3. The zoo, as a map of the hook space</h2>
+		<ul>
+			<li><strong>Guards:</strong> <code>confirm-destructive</code>, <code>protected-paths</code>, <code>dirty-repo-guard</code> — variations on tool_call veto.</li>
+			<li><strong>Workflow:</strong> <code>plan-mode</code> (a read-only planning phase — <code>setActiveTools</code> in action), <code>auto-commit-on-exit</code>, <code>handoff</code>.</li>
+			<li><strong>Context surgery:</strong> <code>custom-compaction</code> (replace Module 7's algorithm!), <code>input-transform</code>, <code>dynamic-resources</code>.</li>
+			<li><strong>Infrastructure swaps:</strong> <code>custom-provider-anthropic</code> (next lesson), <code>bash-spawn-hook</code>, <code>sandbox</code>/<code>gondolin</code> (route tools into a VM — the BashOperations seam from 6.5).</li>
+			<li><strong>UI play:</strong> <code>custom-footer</code>, <code>message-renderer</code>, <code>snake</code>, <code>doom-overlay</code> — proof the TUI layer (Module 9) is fully exposed too.</li>
+		</ul>
+		<p>
+			Pedagogically, this directory <em>is</em> pi's real extension
+			documentation — and the system prompt points the model at it (7.4), so
+			examples double as the corpus pi consults when you ask it to extend
+			itself. Documentation, test suite, and training data in one folder.
+		</p>
+
+		<h2>What you now know</h2>
+		<p>
+			Guard, state-sync, and a taxonomy: most extensions are one
+			well-chosen hook plus a little state, and the ~60 examples cover the
+			hook space like a map. One extension power remains — replacing the
+			model layer itself. That's the finale of the module.
+		</p>
+	</article>
+	<script src="../manifest.js"></script>
+	<script src="../assets/vendor/highlight.min.js"></script>
+	<script src="../assets/js/app.js" defer></script>
+</body>
+</html>

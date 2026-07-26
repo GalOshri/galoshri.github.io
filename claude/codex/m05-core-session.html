@@ -1,0 +1,584 @@
+<!doctype html>
+<html lang="en">
+<head>
+	<meta charset="utf-8">
+	<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+	<meta name="color-scheme" content="light dark">
+	<title>core/ — Session, Thread, and Turn · Codex Explainer</title>
+	<link rel="stylesheet" href="assets/css/site.css">
+</head>
+<body>
+	<article class="lesson" data-module="m05-core-session.html">
+		<h1>core/ — Session, Thread, and Turn</h1>
+		<p class="lede">
+			<code>codex-core</code> is 180,000 lines across roughly a hundred files, several
+			of them 80&nbsp;KB or more. Opening it cold is genuinely intimidating. This
+			module gives you a method for reading crates this size, then uses it on the four
+			things that matter: who owns threads, how a submission becomes work, what the
+			model is shown, and what happens when the conversation gets too long.
+		</p>
+
+		<section class="lesson-section" id="mapping" data-minutes="9">
+			<h2>Mapping a crate this big</h2>
+
+			<p>
+				You cannot read <code>core</code> front to back, and you should not try. Here
+				is what actually works, in order.
+			</p>
+
+			<p>
+				<strong>First, split code from tests.</strong> A large fraction of those files
+				are test suites. <code class="path">codex-rs/core/src/mcp_tool_call.rs</code>
+				is 77&nbsp;KB, but
+				<code class="path">codex-rs/core/src/mcp_tool_call_tests.rs</code> next to it is
+				99&nbsp;KB. Any file ending <code>_tests.rs</code> can be ignored on a first
+				pass — and its existence tells you the neighbouring file is important enough to
+				deserve more test code than implementation.
+			</p>
+
+			<p>
+				<strong>Second, read the directory names, not the file names.</strong>
+				<code>core/src</code> has fifteen subdirectories, and they partition the crate
+				far better than the flat files do:
+			</p>
+
+			<div class="table-wrap">
+				<table>
+					<thead>
+						<tr><th>Directory</th><th>What lives there</th></tr>
+					</thead>
+					<tbody>
+						<tr><td><code>session/</code></td><td>The session, the turn loop, the input queue, world state</td></tr>
+						<tr><td><code>tasks/</code></td><td>Kinds of work: regular turn, compaction, review, user shell</td></tr>
+						<tr><td><code>tools/</code></td><td>The tool registry, router, approvals, sandboxing glue</td></tr>
+						<tr><td><code>context_manager/</code></td><td>Conversation history and what the model is shown</td></tr>
+						<tr><td><code>state/</code></td><td>Mutable session state, task tracking</td></tr>
+						<tr><td><code>sandboxing/</code></td><td>Applying the sandbox to a command</td></tr>
+						<tr><td><code>config/</code></td><td>Config types owned by core</td></tr>
+						<tr><td><code>plugins/</code>, <code>guardian/</code>, <code>apps/</code></td><td>Extension surfaces</td></tr>
+					</tbody>
+				</table>
+			</div>
+
+			<p>
+				<strong>Third, find the type that everything hangs off.</strong> In
+				<code>core</code> that is <code>Session</code>, and its handle
+				<code>CodexThread</code>. Follow those and the crate organises itself.
+			</p>
+
+			<aside class="concept" data-kind="eng">
+				<p class="concept-label">Engineering · Reading by public surface</p>
+				<p>
+					The single highest-value command when meeting a big Rust file is to list its
+					public items and nothing else — <code>grep -n 'pub fn\|pub struct\|pub
+					enum'</code>. A 25&nbsp;KB file might have eight public functions; those
+					eight are the file's actual API and everything else is support. This works
+					far better in Rust than Python because privacy is the default and
+					<code>pub</code> is a deliberate act. It is how every excerpt in this module
+					was found.
+				</p>
+			</aside>
+
+			<div class="callout note">
+				<span class="callout-label">Note</span>
+				<p>
+					You will notice <code>pub(crate)</code> on most things in
+					<code>core</code>. That means "public inside this crate, invisible outside".
+					So <code>core</code>'s genuine external API — the part other crates can
+					touch — is much smaller than it first appears. Anything
+					<code>pub(crate)</code> is an internal detail you can read without worrying
+					that the rest of the world depends on it.
+				</p>
+			</div>
+		</section>
+
+		<section class="lesson-section" id="thread-manager" data-minutes="8">
+			<h2>ThreadManager: threads and their lifetimes</h2>
+
+			<p>
+				One process can have many conversations open. <code>ThreadManager</code> owns
+				them all, and is deliberately thin:
+			</p>
+
+			<figure class="code">
+				<figcaption><span>codex-rs/core/src/thread_manager.rs</span><span class="lines">lines 194–197</span></figcaption>
+				<pre><code class="language-rust">pub struct ThreadManager {
+    state: Arc&lt;ThreadManagerState&gt;,
+    _test_codex_home_guard: Option&lt;TempCodexHomeGuard&gt;,
+}</code></pre>
+			</figure>
+
+			<p>
+				Its public API is the vocabulary of thread management:
+				<code>start_thread</code>, <code>get_thread</code>,
+				<code>list_thread_ids</code>, <code>update_thread_metadata</code>,
+				<code>subscribe_thread_created</code>. It also hands out the shared services
+				every thread needs — <code>auth_manager</code>, <code>mcp_manager</code>,
+				<code>skills_service</code>, <code>plugins_manager</code> — because those are
+				expensive and belong to the process, not to any one conversation.
+			</p>
+
+			<aside class="concept" data-kind="rust">
+				<p class="concept-label">Rust · The leading underscore on a field</p>
+				<p>
+					<code>_test_codex_home_guard</code> is never read. It exists to be
+					<em>dropped</em>: when the <code>ThreadManager</code> goes away, that field's
+					destructor runs and deletes a temporary directory. Rust's
+					<code>Drop</code> is deterministic — it fires the moment a value goes out of
+					scope, not whenever a garbage collector gets round to it — so "hold this
+					value to keep a resource alive" is a standard idiom. Python's closest
+					relative is a context manager, but here the scope <em>is</em> the
+					<code>with</code> block. The underscore silences the unused-field warning
+					and signals the intent.
+				</p>
+			</aside>
+
+			<p>
+				Starting a thread takes an options struct rather than a dozen arguments:
+			</p>
+
+			<figure class="code">
+				<figcaption><span>codex-rs/core/src/thread_manager.rs</span><span class="lines">StartThreadOptions</span></figcaption>
+				<pre><code class="language-rust">pub struct StartThreadOptions {
+    pub config: Config,
+    pub allow_provider_model_fallback: bool,
+    pub initial_history: InitialHistory,
+    pub history_mode: Option&lt;ThreadHistoryMode&gt;,
+    pub session_source: Option&lt;SessionSource&gt;,
+    pub thread_source: Option&lt;ThreadSource&gt;,
+    pub dynamic_tools: Vec&lt;codex_protocol::dynamic_tools::DynamicToolSpec&gt;,
+    pub metrics_service_name: Option&lt;String&gt;,
+    pub parent_trace: Option&lt;W3cTraceContext&gt;,
+    pub environments: Option&lt;Vec&lt;TurnEnvironmentSelection&gt;&gt;,
+    pub thread_extension_init: ExtensionDataInit,
+    pub supports_openai_form_elicitation: bool,
+}</code></pre>
+			</figure>
+
+			<p>
+				<code>initial_history: InitialHistory</code> is the interesting field. A new
+				thread starts with <code>InitialHistory::New</code>; a resumed or forked one
+				starts with history read from a rollout file. Resumption is not a special code
+				path — it is the same constructor with a different starting value, which is why
+				<code>codex resume</code> and <code>codex fork</code> behave identically to a
+				fresh session thereafter.
+			</p>
+
+			<div class="callout deeper">
+				<span class="callout-label">Go deeper (optional)</span>
+				<p>
+					<code>parent_trace: Option&lt;W3cTraceContext&gt;</code> is distributed
+					tracing plumbing — the same <code>W3cTraceContext</code> that appeared on
+					<code>Submission</code> in Module&nbsp;4. It lets a trace started in the IDE
+					follow a request through the app-server, into core, and out to the model
+					API. If you have used OpenTelemetry, this is that.
+				</p>
+			</div>
+		</section>
+
+		<section class="lesson-section" id="codex-thread" data-minutes="8">
+			<h2>CodexThread: the submission loop</h2>
+
+			<p>
+				<code>CodexThread</code> is the handle a client holds. Module&nbsp;3 showed its
+				two-method core; here is what it actually contains:
+			</p>
+
+			<figure class="code">
+				<figcaption><span>codex-rs/core/src/codex_thread.rs</span><span class="lines">lines 182–189</span></figcaption>
+				<pre><code class="language-rust">pub struct CodexThread {
+    pub(crate) session: Arc&lt;Session&gt;,
+    pub(crate) io: SessionIo,
+    pub(crate) session_source: SessionSource,
+    session_configured: SessionConfiguredEvent,
+    rollout_path: Option&lt;PathBuf&gt;,
+    out_of_band_elicitations: Mutex&lt;OutOfBandElicitations&gt;,
+}</code></pre>
+			</figure>
+
+			<p>
+				<code>Session</code> is the state; <code>SessionIo</code> is the pair of queues.
+				Every public method on <code>CodexThread</code> is a thin forward to one or the
+				other:
+			</p>
+
+			<figure class="code">
+				<figcaption><span>codex-rs/core/src/codex_thread.rs</span><span class="lines">the forwarding pattern</span></figcaption>
+				<pre><code class="language-rust">pub async fn submit(&amp;self, op: Op) -&gt; CodexResult&lt;String&gt; {
+    self.io.submit(op).await
+}
+
+pub async fn next_event(&amp;self) -&gt; CodexResult&lt;Event&gt; {
+    self.io.next_event().await
+}
+
+pub async fn agent_status(&amp;self) -&gt; AgentStatus {
+    self.io.agent_status().await
+}</code></pre>
+			</figure>
+
+			<aside class="concept" data-kind="eng">
+				<p class="concept-label">Engineering · A facade worth having</p>
+				<p>
+					It is reasonable to ask why <code>CodexThread</code> exists if it just
+					forwards. Because it is the <em>boundary</em>: <code>Session</code> and
+					<code>SessionIo</code> are internal and change freely, while
+					<code>CodexThread</code>'s surface is what app-server depends on. The
+					forwarding methods are the price of being able to restructure everything
+					behind them without breaking a consumer. Notice also that the fields are
+					<code>pub(crate)</code> — inside the crate the facade can be bypassed;
+					outside it cannot.
+				</p>
+			</aside>
+
+			<p>
+				Beyond the two queue methods, the surface tells you what a client legitimately
+				needs: <code>steer_input</code> (interject mid-turn),
+				<code>try_start_turn_if_idle</code>, <code>inject_response_items</code>,
+				<code>token_usage_info</code>, <code>list_background_terminals</code>,
+				<code>terminate_background_terminal</code>, <code>flush_rollout</code>,
+				<code>shutdown_and_wait</code>.
+			</p>
+
+			<p>
+				That <code>steer_input</code> is the mechanism behind
+				<code>has_pending_input</code> from Module&nbsp;3's loop. And the background
+				terminal methods reveal something the UI hints at: a shell command can outlive
+				the turn that started it, so someone has to be able to list and kill them.
+			</p>
+		</section>
+
+		<section class="lesson-section" id="turn-task" data-minutes="9">
+			<h2>The turn task</h2>
+
+			<p>
+				A submission arrives on the queue; the session picks a
+				<code>SessionTask</code> and spawns it. Module&nbsp;3 read the trait; the point
+				worth returning to is how small it is:
+			</p>
+
+			<figure class="code">
+				<figcaption><span>codex-rs/core/src/tasks/mod.rs</span><span class="lines">the trait's doc comment</span></figcaption>
+				<pre><code class="language-rust">/// [`Session`] and executed on a background Tokio task. The trait is
+/// intentionally small: implementers identify themselves via
+/// [`SessionTask::kind`], perform their work in [`SessionTask::run`], and may
+/// release resources in [`SessionTask::abort`].
+pub(crate) trait SessionTask: Send + Sync + 'static {</code></pre>
+			</figure>
+
+			<p>
+				"Intentionally small" is the design being stated out loud. Four kinds implement
+				it — <code>regular</code>, <code>compact</code>, <code>review</code>,
+				<code>user_shell</code> — and adding a fifth means implementing three methods,
+				not editing a switch statement in the session.
+			</p>
+
+			<p>
+				There is a second trait right beside it, and the pair is worth understanding
+				because you will meet this shape again:
+			</p>
+
+			<figure class="code">
+				<figcaption><span>codex-rs/core/src/tasks/mod.rs</span><span class="lines">SessionTask vs AnySessionTask</span></figcaption>
+				<pre><code class="language-rust">pub(crate) trait SessionTask: Send + Sync + 'static {
+    fn run(
+        self: Arc&lt;Self&gt;,
+        // …
+    ) -&gt; impl std::future::Future&lt;Output = SessionTaskResult&gt; + Send;
+}
+
+pub(crate) trait AnySessionTask: Send + Sync + 'static {
+    fn run(
+        self: Arc&lt;Self&gt;,
+        // …
+    ) -&gt; BoxFuture&lt;'static, SessionTaskResult&gt;;
+}</code></pre>
+			</figure>
+
+			<aside class="concept" data-kind="rust">
+				<p class="concept-label">Rust · Why the same trait twice</p>
+				<p>
+					<code>-&gt; impl Future</code> is the efficient form: each implementation
+					returns its own concrete future type, with no allocation. But a trait using
+					it cannot be turned into <code>dyn Trait</code> — and the session needs to
+					store "some task" without knowing which. So <code>AnySessionTask</code> is
+					the type-erased twin returning a <code>BoxFuture</code> (a heap-allocated
+					future, exactly the <code>Pin&lt;Box&lt;dyn Future&gt;&gt;</code> from
+					Module&nbsp;2), with a blanket implementation bridging every
+					<code>SessionTask</code> to it. Authors write the ergonomic trait; the
+					session stores the erased one. Remember <code>AGENTS.md</code>: <em>"Prefer
+					native RPITIT trait methods with explicit <code>Send</code> bounds"</em> —
+					this is that rule, with its consequence.
+				</p>
+			</aside>
+
+			<p>
+				<code>RegularTask::run</code> announces the turn and then calls
+				<code>run_turn</code>, whose loop you read in Module&nbsp;3. Two details in that
+				loop deserve a second look now.
+			</p>
+
+			<p>
+				The first is what happens <em>before</em> the model is called:
+			</p>
+
+			<figure class="code">
+				<figcaption><span>codex-rs/core/src/session/turn.rs</span><span class="lines">run_turn, the pre-sampling compact</span></figcaption>
+				<pre><code class="language-rust">if let Err(err) = run_pre_sampling_compact(
+    &amp;sess,
+    &amp;turn_context,
+    &amp;mut client_session,
+    &amp;cancellation_token,
+)
+.await
+{
+    if matches!(err.details(), CodexErrorDetails::TurnAborted) {
+        run_hooks_and_record_inputs(&amp;sess, &amp;turn_context, &amp;input).await;
+        return Err(err);
+    }
+    let error = err.to_codex_protocol_error();
+    sess.emit_turn_error_lifecycle(turn_context.as_ref(), error.clone())
+        .await;
+    error!("Failed to run pre-sampling compact");
+    return Ok(None);
+}</code></pre>
+			</figure>
+
+			<p>
+				Before spending a model call, check whether the conversation still fits — and if
+				not, summarise it first. Note the careful error handling: an
+				<em>aborted</em> turn still records its inputs and propagates, while any other
+				failure is emitted as a lifecycle error and ends the turn as
+				<code>Ok(None)</code> — a non-error "nothing produced". Interruption and failure
+				stay distinguishable all the way down, exactly as <code>TurnStatus</code>
+				promised in Module&nbsp;4.
+			</p>
+
+			<p>
+				The second is the <code>TODO</code> immediately above it, left in the source:
+			</p>
+
+			<figure class="code">
+				<figcaption><span>codex-rs/core/src/session/turn.rs</span><span class="lines">an honest TODO</span></figcaption>
+				<pre><code class="language-rust">// TODO(ccunningham): Pre-turn compaction runs before context updates and the
+// new user message are recorded. Estimate pending incoming items (context
+// diffs/full reinjection + user input) and trigger compaction preemptively
+// when they would push the thread over the compaction threshold.</code></pre>
+			</figure>
+
+			<p>
+				A known imprecision, named and attributed: compaction currently measures the
+				conversation <em>before</em> adding what is about to be added, so it can just
+				overshoot. This is what production code actually looks like, and reading these
+				comments is the fastest way to learn where a system's real edges are.
+			</p>
+		</section>
+
+		<section class="lesson-section" id="context-manager" data-minutes="9">
+			<h2>The context manager</h2>
+
+			<p>
+				The model does not see the conversation. It sees whatever
+				<code>context_manager</code> decides to render. That distinction is the whole
+				subject.
+			</p>
+
+			<p>
+				The history's internal API divides cleanly into recording, measuring, and
+				rendering:
+			</p>
+
+			<div class="table-wrap">
+				<table>
+					<thead>
+						<tr><th>Method</th><th>Purpose</th></tr>
+					</thead>
+					<tbody>
+						<tr><td><code>record_items(items, policy)</code></td><td>Append, applying a <code>TruncationPolicy</code></td></tr>
+						<tr><td><code>for_prompt(input_modalities)</code></td><td>Render what the model will actually receive</td></tr>
+						<tr><td><code>raw_items()</code> / <code>into_raw_items()</code></td><td>The unfiltered truth</td></tr>
+						<tr><td><code>estimate_token_count(ctx)</code></td><td>How big is this conversation?</td></tr>
+						<tr><td><code>get_total_token_usage(...)</code></td><td>What did we actually spend?</td></tr>
+						<tr><td><code>remove_first_item()</code>, <code>drop_last_n_user_turns(n)</code></td><td>Forget, from either end</td></tr>
+						<tr><td><code>replace(items)</code></td><td>Swap the whole history — how compaction lands</td></tr>
+					</tbody>
+				</table>
+			</div>
+
+			<p>
+				<code>for_prompt</code> is the one to hold onto. Module&nbsp;3 saw it called:
+			</p>
+
+			<figure class="code">
+				<figcaption><span>codex-rs/core/src/session/turn.rs</span><span class="lines">rendering history for the model</span></figcaption>
+				<pre><code class="language-rust">let sampling_request_input: Vec&lt;ResponseItem&gt; = async {
+    sess.clone_history()
+        .await
+        .for_prompt(&amp;turn_context.model_info.input_modalities)
+}
+.instrument(trace_span!("run_turn.prepare_sampling_request_input"))
+.await;</code></pre>
+			</figure>
+
+			<p>
+				Two things happen here. The history is <em>cloned</em>, so the rendering cannot
+				mutate the record. And it is filtered by <code>input_modalities</code> — if this
+				model cannot accept images, the images are dropped from what it is sent, while
+				staying in the stored conversation. Switch to a vision model mid-thread and
+				they reappear.
+			</p>
+
+			<aside class="concept" data-kind="llm">
+				<p class="concept-label">LLM · Why history is rebuilt every call</p>
+				<p>
+					Language models are stateless. Each request carries the entire conversation
+					again — there is no server-side memory of your last message. That is why
+					<code>for_prompt</code> runs on every iteration of the loop, why token counts
+					grow superlinearly with turn count, and why the context window is a hard
+					wall rather than a soft one. Everything in the next section follows from
+					this single fact.
+				</p>
+			</aside>
+
+			<p>
+				<code>remove_first_item</code> and <code>drop_last_n_user_turns</code> are the
+				crude instruments — drop from the front, or roll back whole turns from the end.
+				<code>replace</code> is the surgical one, and it is what compaction uses.
+			</p>
+		</section>
+
+		<section class="lesson-section" id="compaction" data-minutes="9">
+			<h2>Compaction: forgetting gracefully</h2>
+
+			<p>
+				When a conversation approaches the context window, Codex asks the model to
+				summarise it, then <em>replaces</em> the history with that summary. The
+				conversation continues; its early detail does not.
+			</p>
+
+			<p>
+				The prompt that does it is a plain Markdown file, and it is short enough to
+				read whole:
+			</p>
+
+			<figure class="code">
+				<figcaption><span>codex-rs/prompts/templates/compact/prompt.md</span><span class="lines">complete</span></figcaption>
+				<pre><code class="language-markdown">You are performing a CONTEXT CHECKPOINT COMPACTION. Create a handoff
+summary for another LLM that will resume the task.
+
+Include:
+- Current progress and key decisions made
+- Important context, constraints, or user preferences
+- What remains to be done (clear next steps)
+- Any critical data, examples, or references needed to continue
+
+Be concise, structured, and focused on helping the next LLM seamlessly
+continue the work.</code></pre>
+			</figure>
+
+			<p>
+				Note the framing: not "summarise this conversation" but "write a handoff for
+				another LLM that will resume the task". Compaction is treated as a shift change,
+				and the prompt optimises for whoever picks up the work.
+			</p>
+
+			<figure class="code">
+				<figcaption><span>codex-rs/prompts/src/compact.rs</span><span class="lines">line 1</span></figcaption>
+				<pre><code class="language-rust">pub const SUMMARIZATION_PROMPT: &amp;str = include_str!("../templates/compact/prompt.md");</code></pre>
+			</figure>
+
+			<aside class="concept" data-kind="rust">
+				<p class="concept-label">Rust · <code>include_str!</code></p>
+				<p>
+					Reads a file <em>at compile time</em> and embeds its contents as a
+					<code>&amp;'static str</code> in the binary. The prompt is editable as
+					Markdown by anyone, with no build step and no runtime file I/O to fail. This
+					is why <code>codex-rs/prompts/templates/</code> is worth browsing: it is
+					every instruction Codex gives a model, in plain text.
+				</p>
+			</aside>
+
+			<p>
+				Compaction comes in more than one flavour. The functions in
+				<code class="path">codex-rs/core/src/compact.rs</code> are
+				<code>run_compact_task</code> (you asked for it) and
+				<code>run_inline_auto_compact_task</code> (it happened mid-turn because you
+				were about to overflow). There is also a size guard:
+			</p>
+
+			<figure class="code">
+				<figcaption><span>codex-rs/core/src/compact.rs</span><span class="lines">line 56</span></figcaption>
+				<pre><code class="language-rust">const COMPACT_USER_MESSAGE_MAX_TOKENS: usize = 20_000;</code></pre>
+			</figure>
+
+			<p>
+				And there are sibling files —
+				<code class="path">codex-rs/core/src/compact_remote.rs</code>,
+				<code class="path">codex-rs/core/src/compact_remote_v2.rs</code>,
+				<code class="path">codex-rs/core/src/compact_model_fallback.rs</code> — because
+				summarisation can also happen server-side, and because the model you were using
+				might not be available to do it.
+			</p>
+
+			<p>
+				Compaction is not silent. It emits an event and leaves a permanent item in the
+				transcript — <code>EventMsg::ContextCompacted</code> and
+				<code>TurnItem::ContextCompaction</code> from Module&nbsp;4 — so both you and
+				the rollout file know a memory was lost and when.
+			</p>
+
+			<figure class="code">
+				<figcaption><span>codex-rs/core/src/compact.rs</span><span class="lines">imports, showing the hook points</span></figcaption>
+				<pre><code class="language-rust">use crate::hook_runtime::PostCompactHookOutcome;
+use crate::hook_runtime::PreCompactHookOutcome;
+use crate::hook_runtime::run_post_compact_hooks;
+use crate::hook_runtime::run_pre_compact_hooks;</code></pre>
+			</figure>
+
+			<p>
+				Even this has extension points: hooks run before and after compaction, so a
+				plugin can save state that is about to be forgotten. Module&nbsp;11 covers
+				hooks.
+			</p>
+
+			<details class="digression">
+				<summary>Why does compaction have its own analytics vocabulary?</summary>
+				<div class="digression-body">
+					<p>
+						<code>compact.rs</code> imports <code>CompactionPhase</code>,
+						<code>CompactionReason</code>, <code>CompactionStatus</code>,
+						<code>CompactionStrategy</code>, <code>CompactionTrigger</code>, and
+						<code>CompactionImplementation</code> from <code>codex-analytics</code>.
+						Six separate dimensions of telemetry for one operation. That is a strong
+						signal: compaction is a place where quality quietly degrades, and if it
+						fires too early, too often, or drops the wrong things, users experience
+						it as "the agent got dumber" without knowing why. You cannot debug that
+						from a bug report — only from aggregate data.
+					</p>
+				</div>
+			</details>
+
+			<h3>What you now know</h3>
+
+			<p>
+				Read a big crate by ignoring <code>_tests.rs</code> files, reading directory
+				names, listing public items, and finding the central type.
+				<code>ThreadManager</code> owns threads and the process-wide services;
+				<code>CodexThread</code> is a deliberately thin facade over
+				<code>Session</code> plus two queues; tasks are a small trait with a
+				type-erased twin; the context manager rebuilds the model's view on every call
+				and filters it by what the model can accept; and compaction replaces history
+				with a handoff summary, loudly, with hooks and heavy telemetry.
+			</p>
+
+			<p>
+				One box is still shut: what <code>run_sampling_request</code> actually does.
+				Next module opens it.
+			</p>
+		</section>
+	</article>
+	<script src="manifest.js"></script>
+	<script src="assets/vendor/highlight.min.js"></script>
+	<script src="assets/js/app.js" defer></script>
+</body>
+</html>

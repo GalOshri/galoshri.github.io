@@ -1,0 +1,485 @@
+<!doctype html>
+<html lang="en">
+<head>
+	<meta charset="utf-8">
+	<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+	<meta name="color-scheme" content="light dark">
+	<title>protocol/ — The Shared Vocabulary · Codex Explainer</title>
+	<link rel="stylesheet" href="assets/css/site.css">
+</head>
+<body>
+	<article class="lesson" data-module="m04-protocol.html">
+		<h1>protocol/ — The Shared Vocabulary</h1>
+		<p class="lede">
+			Before any crate can do anything interesting, they all have to agree on what a
+			message, a turn, and a command execution <em>are</em>. That agreement is a crate
+			of its own — about 22,000 lines that contain almost no logic and are depended on
+			by everything. This is the dictionary for the rest of the course.
+		</p>
+
+		<section class="lesson-section" id="op-event" data-minutes="9">
+			<h2>Op and Event: the submission queue</h2>
+
+			<p>
+				Module&nbsp;3 introduced the two queues. Here is the file that defines them,
+				opening with a statement of intent:
+			</p>
+
+			<figure class="code">
+				<figcaption><span>codex-rs/protocol/src/protocol.rs</span><span class="lines">lines 1–4</span></figcaption>
+				<pre><code class="language-rust">//! Defines the protocol for a Codex session between a client and an agent.
+//!
+//! Uses a SQ (Submission Queue) / EQ (Event Queue) pattern to asynchronously
+//! communicate between user and agent.</code></pre>
+			</figure>
+
+			<p>
+				<code>Op</code> is the set of everything a client can ask for. It is a large
+				enum, and reading its variant names is the fastest way to learn what Codex can
+				be told to do:
+			</p>
+
+			<figure class="code">
+				<figcaption><span>codex-rs/protocol/src/protocol.rs</span><span class="lines">Op, selected variants</span></figcaption>
+				<pre><code class="language-rust">pub enum Op {
+    /// Abort current task without terminating background terminal processes.
+    /// This server sends [`EventMsg::TurnAborted`] in response.
+    Interrupt,
+
+    /// Terminate all running background terminal processes for this thread.
+    CleanBackgroundTerminals,
+
+    /// User input, optionally with thread-settings overrides applied first.
+    UserInput { /* … */ },
+
+    /// Apply persistent thread-settings overrides without starting a turn.
+    ThreadSettings { /* … */ },
+
+    /// Approve a command execution
+    ExecApproval { /* … */ },
+
+    /// Start a realtime conversation stream.
+    RealtimeConversationStart(ConversationStartParams),
+}</code></pre>
+			</figure>
+
+			<p>
+				Two things are worth pausing on. <code>Interrupt</code>'s doc comment names the
+				event it produces — the protocol documents its own request/response pairs
+				inline. And <code>ExecApproval</code> being an <code>Op</code> means
+				<em>approving a command is a submission just like typing a message</em>. There
+				is no side channel for approvals; they queue up with everything else, which is
+				why ordering is preserved.
+			</p>
+
+			<p>
+				The reply side is <code>EventMsg</code>, and its variants read like a
+				transcript of everything that can happen:
+			</p>
+
+			<figure class="code">
+				<figcaption><span>codex-rs/protocol/src/protocol.rs</span><span class="lines">EventMsg, selected variants</span></figcaption>
+				<pre><code class="language-rust">    TurnStarted(TurnStartedEvent),
+    TurnComplete(TurnCompleteEvent),
+    AgentMessage(AgentMessageEvent),
+    AgentReasoning(AgentReasoningEvent),
+    TokenCount(TokenCountEvent),
+    ExecApprovalRequest(ExecApprovalRequestEvent),
+    ExecCommandBegin(ExecCommandBeginEvent),
+    ExecCommandOutputDelta(ExecCommandOutputDeltaEvent),
+    ExecCommandEnd(ExecCommandEndEvent),
+    McpToolCallBegin(McpToolCallBeginEvent),
+    McpToolCallEnd(McpToolCallEndEvent),
+    WebSearchBegin(WebSearchBeginEvent),
+    WebSearchEnd(WebSearchEndEvent),
+    ContextCompacted(ContextCompactedEvent),
+    Error(ErrorEvent),</code></pre>
+			</figure>
+
+			<p>
+				Notice the <code>Begin</code>/<code>End</code> pairing on everything slow, with
+				a <code>Delta</code> in the middle where output streams. That is a deliberate,
+				repeated shape: any operation that takes time announces its start, streams its
+				progress, and announces its finish, so a UI can draw a spinner and fill it in
+				without special-casing each operation.
+			</p>
+
+			<aside class="concept" data-kind="eng">
+				<p class="concept-label">Engineering · Errors are events, not exceptions</p>
+				<p>
+					<code>Error(ErrorEvent)</code> is a variant like any other. A failed turn
+					does not blow up a call stack — it emits an event, gets recorded in the
+					rollout, and appears in your transcript. Tomorrow you can resume that
+					thread and the model will see what went wrong. This is the same instinct as
+					Rust's <code>Result</code> from Module&nbsp;2, applied one level up:
+					<strong>failure is data</strong>.
+				</p>
+			</aside>
+
+			<div class="callout note">
+				<span class="callout-label">Note</span>
+				<p>
+					<code>EventMsg</code> carries a warning in its doc comment: <em>"Make sure
+					none of these values have optional types, as it will mess up the extension
+					code-gen."</em> Protocol types are compiled into TypeScript for the IDE
+					extension, and an <code>Option</code> in the wrong place produces a type
+					the generator can't express. The protocol is shaped by its consumers.
+				</p>
+			</div>
+		</section>
+
+		<section class="lesson-section" id="item-model" data-minutes="9">
+			<h2>The item model</h2>
+
+			<p>
+				Events describe things <em>happening</em>. Items describe things that
+				<em>exist</em> — the durable contents of a conversation. If events are a live
+				commentary, items are the scorecard.
+			</p>
+
+			<figure class="code">
+				<figcaption><span>codex-rs/protocol/src/items.rs</span><span class="lines">TurnItem, abridged</span></figcaption>
+				<pre><code class="language-rust">pub enum TurnItem {
+    UserMessage(UserMessageItem),
+    HookPrompt(HookPromptItem),
+    AgentMessage(AgentMessageItem),
+    Plan(PlanItem),
+    Reasoning(ReasoningItem),
+    CommandExecution(CommandExecutionItem),
+    DynamicToolCall(DynamicToolCallItem),
+    CollabAgentToolCall(CollabAgentToolCallItem),
+    SubAgentActivity(SubAgentActivityItem),
+    WebSearch(WebSearchItem),
+    ImageView(ImageViewItem),
+    /// Item whose schema and lifecycle details are owned by an extension.
+    Extension(ExtensionItem),
+    ImageGeneration(ImageGenerationItem),
+    EnteredReviewMode(EnteredReviewModeItem),
+    ExitedReviewMode(ExitedReviewModeItem),
+    FileChange(FileChangeItem),
+    McpToolCall(McpToolCallItem),
+    ContextCompaction(ContextCompactionItem),
+}</code></pre>
+			</figure>
+
+			<p>
+				This is the list you saw in the Python SDK in Module&nbsp;1 —
+				<code>result.items</code>, and <code>root.type == "agentMessage"</code>. The
+				same enum, serialised to JSON.
+			</p>
+
+			<p>
+				Read it as an inventory of everything Codex can produce. A turn is not just
+				"the model said something"; it may include a plan, private reasoning, several
+				command executions, file changes, MCP tool calls, and a note that the context
+				had to be compacted halfway through.
+			</p>
+
+			<figure class="code">
+				<figcaption><span>codex-rs/protocol/src/items.rs</span><span class="lines">UserMessageItem</span></figcaption>
+				<pre><code class="language-rust">pub struct UserMessageItem {
+    pub id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub client_id: Option&lt;String&gt;,
+    pub content: Vec&lt;UserInput&gt;,
+}</code></pre>
+			</figure>
+
+			<aside class="concept" data-kind="rust">
+				<p class="concept-label">Rust · <code>skip_serializing_if</code></p>
+				<p>
+					Serde attributes control the JSON shape without changing the Rust type.
+					<code>skip_serializing_if = "Option::is_none"</code> means "omit this key
+					entirely when there's no value", rather than emitting
+					<code>"client_id": null</code>. <code>#[serde(default)]</code> is the
+					mirror image on the way in: a missing key becomes <code>None</code> instead
+					of a parse error. Together they are how a protocol stays
+					backward-compatible while gaining fields.
+				</p>
+			</aside>
+
+			<h3>Two representations, one truth</h3>
+
+			<p>
+				Notice <code>Extension(ExtensionItem)</code> and the comment on it: <em>"Item
+				whose schema and lifecycle details are owned by an extension."</em> The item
+				model is deliberately open — a plugin can introduce an item type that
+				<code>core</code> stores and forwards without understanding. Compare it with
+				the note on <code>WebSearch</code>:
+			</p>
+
+			<figure class="code">
+				<figcaption><span>codex-rs/protocol/src/items.rs</span><span class="lines">the WebSearch comment</span></figcaption>
+				<pre><code class="language-rust">    /// Hosted Responses API web-search item handled directly by core.
+    ///
+    /// Standalone web search uses Self::Extension instead because its display
+    /// schema is owned by the web-search extension.
+    WebSearch(WebSearchItem),</code></pre>
+			</figure>
+
+			<p>
+				Two paths to the same user-visible feature: one where the model provider runs
+				the search and core knows the shape, one where a Codex extension does it and
+				owns its own schema. That kind of duplication is the honest cost of supporting
+				both hosted and local capabilities, and this codebase documents it rather than
+				hiding it.
+			</p>
+		</section>
+
+		<section class="lesson-section" id="threads-turns" data-minutes="7">
+			<h2>Turns, threads, and their states</h2>
+
+			<p>
+				Identifiers get their own files and their own types, rather than being loose
+				strings:
+			</p>
+
+			<figure class="code">
+				<figcaption><span>codex-rs/protocol/src/thread_id.rs</span><span class="lines">lines 11–18</span></figcaption>
+				<pre><code class="language-rust">#[derive(Debug, Clone, Copy, PartialEq, Eq, TS, Hash)]
+#[ts(type = "string")]
+/// Identifier for a Codex thread.
+///
+/// Codex-generated thread IDs are UUIDv7, and some use cases rely on that.
+pub struct ThreadId {
+    pub(crate) uuid: Uuid,
+}</code></pre>
+			</figure>
+
+			<aside class="concept" data-kind="rust">
+				<p class="concept-label">Rust · Newtypes</p>
+				<p>
+					Wrapping a <code>Uuid</code> in a one-field struct costs nothing at runtime
+					and buys a compile error if you ever pass a <code>SessionId</code> where a
+					<code>ThreadId</code> was wanted. In Python both would be <code>str</code>
+					and the mix-up would be a runtime mystery. <code>#[ts(type =
+					"string")]</code> tells the TypeScript generator to flatten it back to a
+					plain string on the wire — the type safety is for Rust's benefit, not the
+					protocol's.
+				</p>
+			</aside>
+
+			<p>
+				The comment "some use cases rely on that" is load-bearing. UUIDv7 embeds a
+				timestamp and sorts chronologically, so sorting thread ids sorts threads by
+				creation time — no separate index needed.
+			</p>
+
+			<p>A turn's life is a four-state machine:</p>
+
+			<figure class="code">
+				<figcaption><span>codex-rs/app-server-protocol/src/protocol/v2/turn.rs</span><span class="lines">lines 30–35</span></figcaption>
+				<pre><code class="language-rust">pub enum TurnStatus {
+    Completed,
+    Interrupted,
+    Failed,
+    InProgress,
+}</code></pre>
+			</figure>
+
+			<p>
+				<code>Interrupted</code> being distinct from <code>Failed</code> matters: you
+				pressing <kbd>Esc</kbd> is not an error, and shouldn't be reported as one or
+				retried. Module&nbsp;3's <code>codex exec</code> loop treats both as reasons to
+				exit non-zero, but a UI can render them very differently.
+			</p>
+		</section>
+
+		<section class="lesson-section" id="app-server-protocol" data-minutes="10">
+			<h2>app-server-protocol: the JSON-RPC dialect</h2>
+
+			<p>
+				Recall from Module&nbsp;3 that the TUI does not speak <code>Op</code>/<code>Event</code> —
+				it speaks a JSON-RPC protocol to an app-server, which then speaks
+				<code>Op</code>/<code>Event</code> to core. That outer protocol is a separate
+				29,000-line crate.
+			</p>
+
+			<p>
+				The interesting part is how it is defined. Not as a hand-written enum, but as a
+				table fed to a macro:
+			</p>
+
+			<figure class="code">
+				<figcaption><span>codex-rs/app-server-protocol/src/protocol/common.rs</span><span class="lines">client_request_definitions!, abridged</span></figcaption>
+				<pre><code class="language-rust">client_request_definitions! {
+    Initialize =&gt; "initialize" {
+        params: v1::InitializeParams,
+        serialization: None,
+        response: v1::InitializeResponse,
+    },
+
+    /// NEW APIs
+    // Thread lifecycle
+    // Uses `inspect_params` because only some fields are experimental.
+    ThreadStart =&gt; "thread/start" {
+        params: v2::ThreadStartParams,
+        inspect_params: true,
+        serialization: None,
+        response: v2::ThreadStartResponse,
+    },
+    ThreadResume =&gt; "thread/resume" {
+        params: v2::ThreadResumeParams,
+        inspect_params: true,
+        serialization: thread_or_path(params.thread_id, params.path),
+        response: v2::ThreadResumeResponse,
+    },
+    ThreadFork =&gt; "thread/fork" {
+        params: v2::ThreadForkParams,
+        inspect_params: true,
+        serialization: thread_or_path(params.thread_id, params.path),
+        response: v2::ThreadForkResponse,
+    },
+}</code></pre>
+			</figure>
+
+			<aside class="concept" data-kind="rust">
+				<p class="concept-label">Rust · Declarative macros</p>
+				<p>
+					<code>macro_rules!</code> defines a macro that matches <em>syntax patterns</em>
+					and expands to code at compile time. It is not string substitution like C's
+					<code>#define</code>, and it is not runtime metaprogramming like Python's
+					decorators or <code>type()</code> — the expansion happens before type
+					checking, and the result is ordinary code the compiler verifies. When you
+					see <code>something! { ... }</code> with a body that doesn't look like Rust,
+					you are reading a domain-specific language someone defined a few hundred
+					lines above.
+				</p>
+			</aside>
+
+			<p>
+				One entry in that table generates, at minimum: a <code>ClientRequest</code>
+				enum variant, the JSON-RPC method string <code>"thread/start"</code>, the
+				matching <code>ClientResponse</code> variant, a TypeScript type, and a JSON
+				Schema file. You can see the generators in the same macro:
+			</p>
+
+			<figure class="code">
+				<figcaption><span>codex-rs/app-server-protocol/src/protocol/common.rs</span><span class="lines">inside the macro expansion</span></figcaption>
+				<pre><code class="language-rust">pub fn export_client_param_schemas(
+    out_dir: &amp;::std::path::Path,
+) -&gt; ::anyhow::Result&lt;Vec&lt;GeneratedSchema&gt;&gt; {
+    let mut schemas = Vec::new();
+    $(
+        schemas.push(write_json_schema::&lt;$params&gt;(out_dir, stringify!($params))?);
+    )*
+    Ok(schemas)
+}</code></pre>
+			</figure>
+
+			<p>
+				The <code>$( ... )*</code> is macro repetition — "do this once per entry in the
+				table". <code>stringify!($params)</code> turns a type name into a string
+				literal at compile time.
+			</p>
+
+			<aside class="concept" data-kind="eng">
+				<p class="concept-label">Engineering · One source, many artefacts</p>
+				<p>
+					This is the pattern worth taking away from the whole module. There is
+					exactly one place where "what requests exist" is written down. The Rust
+					enum, the wire method names, the TypeScript SDK types, and the published
+					JSON schemas are all <em>derived</em> from it. Nothing can drift, because
+					there is nothing to keep in sync. The cost is that the definition is a
+					macro invocation rather than plain code — harder to read once, impossible
+					to get wrong afterwards.
+				</p>
+			</aside>
+
+			<h3>Why <code>v1</code> and <code>v2</code>?</h3>
+
+			<p>
+				Look again at that table: <code>Initialize</code> takes
+				<code>v1::InitializeParams</code>, while the thread operations take
+				<code>v2::</code> types, under a comment reading <code>/// NEW APIs</code>.
+				Both versions are live simultaneously.
+			</p>
+
+			<p>
+				This is the tax of shipping a protocol other people depend on. An IDE extension
+				installed six months ago still speaks v1, and it must keep working. A protocol
+				crate makes that tax visible and manageable: versions sit side by side in one
+				table, and <code>inspect_params</code> flags requests where only <em>some</em>
+				fields are experimental.
+			</p>
+		</section>
+
+		<section class="lesson-section" id="why-protocol-crate" data-minutes="7">
+			<h2>Why a protocol crate exists</h2>
+
+			<p>
+				It is fair to ask why 22,000 lines of type definitions deserve their own crate
+				rather than living in <code>core</code>. Four reasons, all visible in what we
+				just read.
+			</p>
+
+			<p>
+				<strong>It breaks dependency cycles.</strong> <code>tui</code>,
+				<code>exec</code>, <code>app-server</code>, and <code>core</code> all need
+				these types. If they lived in <code>core</code>, then <code>core</code> would
+				be a dependency of everything and nothing could be tested without it. Recall
+				the technique from Module&nbsp;1 — read the <code>Cargo.toml</code>:
+				<code>codex-protocol</code> appears in nearly every crate's dependency list,
+				and it depends on almost nothing itself.
+			</p>
+
+			<p>
+				<strong>It is the code-generation source.</strong> The TypeScript SDK and the
+				JSON schemas are generated from these types. That requires a crate you can
+				compile and run generators over without dragging in the entire agent.
+			</p>
+
+			<p>
+				<strong>It makes the boundary reviewable.</strong> A change to
+				<code>protocol/</code> is a change to a contract with external consumers, and
+				it shows up as such in a diff. A change buried in <code>core</code> would not.
+			</p>
+
+			<p>
+				<strong>It is where the vocabulary is documented.</strong> The doc comments in
+				this crate — "this Op sends that EventMsg in response", "Codex-generated thread
+				IDs are UUIDv7", "make sure none of these values have optional types" — are the
+				closest thing to an architecture document the repository has.
+			</p>
+
+			<figure class="diagram">
+				<div class="drow keep-row">
+					<div class="dbox"><span class="dbox-title">tui</span></div>
+					<div class="dbox"><span class="dbox-title">exec</span></div>
+					<div class="dbox"><span class="dbox-title">app-server</span></div>
+					<div class="dbox"><span class="dbox-title">core</span></div>
+				</div>
+				<span class="darrow">↓ <span class="dlabel">all depend on</span></span>
+				<div class="drow">
+					<div class="dbox accent"><span class="dbox-title">codex-protocol</span><span class="dbox-sub">types, no logic</span></div>
+				</div>
+				<figcaption class="dcaption">
+					A shared vocabulary at the bottom of the graph is what lets the layers
+					above stay independent of each other.
+				</figcaption>
+			</figure>
+
+			<h3>What you now know</h3>
+
+			<p>
+				<code>Op</code> is everything a client can ask for and <code>EventMsg</code>
+				everything that can happen, paired by a correlation id, with
+				<code>Begin</code>/<code>Delta</code>/<code>End</code> for anything slow and
+				errors delivered as data. <code>TurnItem</code> is the durable inventory of
+				what a turn produced, open to extension. Identifiers are newtypes, not strings.
+				The outer JSON-RPC API is generated from a single macro table that also emits
+				TypeScript and JSON Schema, with v1 and v2 coexisting deliberately.
+			</p>
+
+			<p>
+				You can now read the signatures of everything in <code>core</code>. Next we go
+				inside it.
+			</p>
+		</section>
+	</article>
+	<script src="manifest.js"></script>
+	<script src="assets/vendor/highlight.min.js"></script>
+	<script src="assets/js/app.js" defer></script>
+</body>
+</html>

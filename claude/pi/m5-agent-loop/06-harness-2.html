@@ -1,0 +1,120 @@
+<!doctype html>
+<html lang="en">
+<head>
+	<meta charset="utf-8">
+	<meta name="viewport" content="width=device-width, initial-scale=1">
+	<title>The plot twist: pi bypasses its own harness · pi · Codebase Academy</title>
+	<link rel="stylesheet" href="../assets/css/site.css">
+</head>
+<body>
+	<article class="lesson">
+		<h1>The plot twist: pi bypasses its own harness</h1>
+		<p class="lede">
+			Here's the fact this module has been building toward: the pi coding
+			agent — flagship product of this repository — does <em>not</em> use
+			<code>AgentHarness</code>. It wires its own <code>AgentSession</code>
+			directly onto the low-level <code>Agent</code>, re-implementing
+			persistence and compaction its own way. This is not an accident, and
+			understanding why teaches you something textbooks won't.
+		</p>
+
+		<h2>The evidence</h2>
+		<p>
+			Check the coding agent's imports (the technique from lesson 1.4 —
+			architecture claims are verified at the import line). Its central
+			<code>AgentSession</code> pulls <code>Agent</code>, the loop types, and
+			the message types from <code>pi-agent-core</code> — but no
+			<code>AgentHarness</code>. It has its own
+			<code>SessionManager</code> (1,600 lines, Module 7), its own compaction
+			module with its own budgets, its own extension system (3,700 lines,
+			Module 8). The harness's session tree and the session file format you
+			saw in lesson 2.7 are <em>parallel implementations of the same
+			design</em> — same entry types, same id/parentId tree, same leaf
+			pointer — maintained separately.
+		</p>
+
+		<h2>Why would they do that?</h2>
+		<p>
+			Not ignorance — the same two people wrote both layers, in the same repo,
+			at the same time. The realistic reasons, each a general lesson:
+		</p>
+		<ul>
+			<li>
+				<strong>Products need custom everything, eventually.</strong> The
+				coding agent's session entries carry coding-specific baggage
+				(bash executions with exit codes, TUI render hints); its compaction
+				coordinates with a UI, settings, and extension hooks; its trust
+				model gates what loads per project. A generic harness serves the
+				80% case; a flagship product lives in the other 20%. When the
+				framework's assumptions and the product's needs diverge weekly, the
+				framework becomes friction.
+			</li>
+			<li>
+				<strong>The two layers have different customers.</strong>
+				<code>AgentHarness</code> is for <em>other people</em> — SDK users
+				who want an agent without building session logic (pi-chat, the
+				Slack sibling project, is the intended audience). The coding agent
+				is for <em>its authors</em>, who are happy to hand-wire because
+				they own every piece. Library code optimizes for generality;
+				product code optimizes for control.
+			</li>
+			<li>
+				<strong>History moves in one direction.</strong> The coding agent's
+				infrastructure came first; the harness was extracted <em>from</em>
+				its patterns as a reusable offering. Migrating the working product
+				onto the extraction would be risk with little payoff. Codebases
+				are archaeological sites — layers reflect <em>when</em> things were
+				built, not just how they should be.
+			</li>
+		</ul>
+
+		<aside class="concept" data-kind="eng">
+			<p class="concept-label">Engineering · The framework/library tension</p>
+			<p>
+				A <strong>library</strong> is code you call; control stays with you.
+				A <strong>framework</strong> calls <em>your</em> code; control
+				inverts. Frameworks are wonderful right up until your needs leave
+				their happy path — then every feature becomes a negotiation with
+				someone else's assumptions. Seasoned teams therefore often ship
+				<em>both</em>: a low-level library ("bring your own everything" —
+				<code>Agent</code>) and a framework on top
+				(<code>AgentHarness</code>), and let each consumer pick their layer.
+				pi's own product picking the low layer isn't hypocrisy; it's the
+				layering working as intended.
+			</p>
+			<p>
+				The reading skill this buys you: when you open any big codebase and
+				find two implementations of the same idea, don't assume incompetence.
+				Ask <em>who consumes each</em>, and <em>which came first</em>. The
+				answer usually reveals the project's real structure better than any
+				architecture diagram.
+			</p>
+		</aside>
+
+		<h2>What it costs</h2>
+		<p>
+			Honesty requires the debit column: two session-tree implementations
+			must now evolve in parallel (the format doc lists version migrations
+			both must honor); improvements land twice or drift; newcomers — like
+			you, three lessons ago — get confused about which layer is "real."
+			The maintainers accepted those costs deliberately. Duplication is not
+			free; it's <em>sometimes cheaper than coupling</em>. That sentence is
+			worth the whole module.
+		</p>
+
+		<h2>Module 5, closed</h2>
+		<p>
+			You now hold the complete agent layer: <code>AgentTool</code> and the
+			LLM boundary, the loop's turns and tool pipeline, the Agent's state,
+			queues, and awaited broadcast, the harness's event-sourced tree — and
+			the map of which parts the product actually uses. From here the course
+			climbs into <code>pi-coding-agent</code> itself: startup, the seven
+			tools, sessions, memory, and the extension system. The library half of
+			pi is behind you; the product half begins.
+		</p>
+	</article>
+	<script src="../manifest.js"></script>
+	<script src="../assets/vendor/highlight.min.js"></script>
+	<script src="../assets/js/app.js" defer></script>
+</body>
+</html>

@@ -1,0 +1,125 @@
+<!doctype html>
+<html lang="en">
+<head>
+	<meta charset="utf-8">
+	<meta name="viewport" content="width=device-width, initial-scale=1">
+	<title>Branching and forking · pi · Codebase Academy</title>
+	<link rel="stylesheet" href="../assets/css/site.css">
+</head>
+<body>
+	<article class="lesson">
+		<h1>Branching and forking</h1>
+		<p class="lede">
+			Conversations with agents go wrong in a specific way: five turns in,
+			you realize turn two sent things sideways. Deleting history is lossy;
+			starting over is wasteful. pi's answer — conversations are trees, and
+			you can stand on any node — falls out of one field you've already met.
+		</p>
+
+		<h2>The tree, drawn</h2>
+		<figure class="svg-diagram">
+			<svg viewBox="0 0 560 240" width="560" role="img" aria-label="A session tree: a trunk of messages, a fork where two branches diverge, the leaf pointer on the active branch">
+				<defs>
+					<marker id="arr7" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse">
+						<path d="M0,0 L10,5 L0,10 z" fill="currentColor" opacity="0.5"/>
+					</marker>
+				</defs>
+				<g fill="none" stroke="currentColor" stroke-opacity="0.45" stroke-width="1.3">
+					<circle cx="60" cy="120" r="16"/>
+					<circle cx="140" cy="120" r="16"/>
+					<circle cx="220" cy="120" r="16"/>
+					<circle cx="310" cy="60" r="16"/>
+					<circle cx="400" cy="60" r="16"/>
+					<circle cx="310" cy="180" r="16"/>
+					<circle cx="400" cy="180" r="16"/>
+					<circle cx="490" cy="180" r="16"/>
+					<line x1="76" y1="120" x2="121" y2="120" marker-end="url(#arr7)"/>
+					<line x1="156" y1="120" x2="201" y2="120" marker-end="url(#arr7)"/>
+					<line x1="234" y1="111" x2="293" y2="69" marker-end="url(#arr7)"/>
+					<line x1="326" y1="60" x2="381" y2="60" marker-end="url(#arr7)"/>
+					<line x1="234" y1="129" x2="293" y2="171" marker-end="url(#arr7)"/>
+					<line x1="326" y1="180" x2="381" y2="180" marker-end="url(#arr7)"/>
+					<line x1="416" y1="180" x2="471" y2="180" marker-end="url(#arr7)"/>
+				</g>
+				<g fill="currentColor" font-size="11" text-anchor="middle">
+					<text x="60" y="124">user</text>
+					<text x="140" y="124">asst</text>
+					<text x="220" y="124">user</text>
+					<text x="310" y="64">asst</text>
+					<text x="400" y="64">user</text>
+					<text x="310" y="184">asst</text>
+					<text x="400" y="184">user</text>
+					<text x="490" y="184">asst</text>
+					<text x="355" y="30" opacity="0.55">abandoned branch</text>
+					<text x="400" y="220" opacity="0.55">active branch</text>
+					<text x="490" y="152" opacity="0.8" font-size="10">← leaf</text>
+				</g>
+			</svg>
+			<figcaption>Same file, two branches. Entries are never deleted; the leaf pointer decides which path is "the conversation."</figcaption>
+		</figure>
+		<p>
+			Mechanically it's all appends (lesson 2.7's promise, kept): every entry
+			carries <code>id</code> and <code>parentId</code>; "the conversation"
+			is the path from root to the <strong>leaf pointer</strong>; rewinding
+			means appending your next message with an <em>older</em> entry as its
+			parent and moving the leaf. The abandoned branch stays in the file,
+			revisitable forever.
+		</p>
+
+		<h2>The user experience it buys</h2>
+		<ul>
+			<li><strong><code>/tree</code></strong> — a navigator showing the whole structure; pick any node and continue from there.</li>
+			<li><strong><code>/fork</code></strong> — branch from the current point into a parallel line of attack.</li>
+			<li><strong>Retry a message</strong> — edit your last prompt and resend: a sibling branch, with the failed attempt preserved for comparison.</li>
+			<li><strong><code>/resume</code></strong> — reopen any session at its leaf, days later.</li>
+		</ul>
+		<p>
+			If this feels like git — commits with parents, branches, HEAD — that's
+			not analogy, it's the same data structure: a persistent tree grown by
+			appending, with a movable pointer defining "current." One mental model,
+			two tools you now understand.
+		</p>
+
+		<h2>The context problem branching creates</h2>
+		<p>
+			One subtlety keeps this honest. When you rewind past an assistant
+			exchange, the model <em>loses</em> whatever it learned there — the
+			abandoned branch isn't in the new path's context. Sometimes that's the
+			point (the branch was poison); sometimes the branch did useful
+			reconnaissance you'd hate to lose. pi's answer is
+			<strong>branch summarization</strong>: on navigating away, it can ask a
+			model to compress the abandoned branch into a
+			<code>branch_summary</code> entry attached to the new path — "in a
+			previous attempt, we tried X and learned Y." The knowledge survives at
+			a fraction of the tokens. Notice the shape: <em>summarize what you
+			can't afford to keep verbatim</em>. Hold that thought for one lesson —
+			it's about to become the whole show.
+		</p>
+
+		<div class="callout note">
+			<span class="callout-label">Note · why trees beat undo</span>
+			<p>
+				A linear undo stack destroys the redo branch the moment you type
+				something new — everyone has lost work to that. Trees never
+				sacrifice anything: every path taken remains reachable. The cost is
+				conceptual (users must grasp "where am I in the tree?") and pi
+				spends real UI effort (<code>/tree</code>'s visualization, labels,
+				summaries) paying it down. Data structures are UX decisions wearing
+				a trench coat.
+			</p>
+		</div>
+
+		<h2>What you now know</h2>
+		<p>
+			Branching = parentId + a leaf pointer + append-only discipline: git
+			for conversations, with model-written summaries stitching knowledge
+			across branches. Next, the pressure that makes summarization
+			mandatory rather than optional: the context window fills, and
+			something must give. Compaction.
+		</p>
+	</article>
+	<script src="../manifest.js"></script>
+	<script src="../assets/vendor/highlight.min.js"></script>
+	<script src="../assets/js/app.js" defer></script>
+</body>
+</html>

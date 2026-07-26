@@ -1,0 +1,185 @@
+<!doctype html>
+<html lang="en">
+<head>
+	<meta charset="utf-8">
+	<meta name="viewport" content="width=device-width, initial-scale=1">
+	<title>Providers and 1,042 models · pi · Codebase Academy</title>
+	<link rel="stylesheet" href="../assets/css/site.css">
+</head>
+<body>
+	<article class="lesson">
+		<h1>Providers and 1,042 models</h1>
+		<p class="lede">
+			Run <code>pi --list-models</code> and over a thousand entries scroll past,
+			each with a context window, a price list, and capability flags. Where does
+			that knowledge live? In the largest — and least interesting to read —
+			part of <code>pi-ai</code>: generated data. This lesson is about models as
+			<em>metadata</em>, and the small runtime that serves it.
+		</p>
+
+		<h2>A model is a record</h2>
+		<figure class="code">
+			<figcaption><span>packages/ai/src/providers/anthropic.models.ts</span><span class="lines">one entry, verbatim</span></figcaption>
+			<pre><code class="language-typescript">"claude-sonnet-4-5": {
+	id: "claude-sonnet-4-5",
+	name: "Claude Sonnet 4.5 (latest)",
+	api: "anthropic-messages",
+	provider: "anthropic",
+	baseUrl: "https://api.anthropic.com",
+	reasoning: true,
+	input: ["text", "image"],
+	cost: {
+		input: 3,        // $ per million tokens
+		output: 15,
+		cacheRead: 0.3,
+		cacheWrite: 3.75,
+	},
+	contextWindow: 200000,
+	maxTokens: 64000,
+} satisfies Model&lt;"anthropic-messages"&gt;,</code></pre>
+		</figure>
+		<p>
+			Everything pi needs to know to use a model responsibly: which wire
+			protocol it speaks (<code>api</code>), where (<code>baseUrl</code>),
+			whether it can reason and see images, how big the conversation may grow
+			(<code>contextWindow</code>), and — crucially — the four-way price list.
+			The file this lives in is stamped "auto-generated" at the top: a script
+			(<code>scripts/generate-models.ts</code>) compiles these catalogs from
+			upstream sources. There are ~18,700 lines of entries like this across 35
+			provider catalogs — 258 for OpenRouter alone.
+		</p>
+
+		<aside class="concept" data-kind="eng">
+			<p class="concept-label">Engineering · Generated code: data wearing a code costume</p>
+			<p>
+				Why generate TypeScript instead of shipping a JSON file? Because code
+				gets type-checked: every entry is validated against
+				<code>Model&lt;"anthropic-messages"&gt;</code> at compile time (that's
+				what <code>satisfies</code> does — "check this literal against that
+				type, but keep its precise inferred type"). A typo'd field in 18,700
+				lines fails the build instead of failing a customer.
+			</p>
+			<p>
+				The rules for generated code: <em>never edit it by hand</em> (pi's
+				AGENTS.md makes this an explicit law — fix the generator instead),
+				don't review its diffs line by line, and don't count it when judging a
+				codebase's size. "36,000 lines of pi-ai" sounds intimidating; it's
+				really ~17k of prose-worthy code plus a big, machine-written phone
+				book. Learning to spot which is which — check for a generator header,
+				check the repetition — instantly shrinks any large repo you open.
+			</p>
+		</aside>
+
+		<h2>A provider is a binding</h2>
+		<p>
+			Models are grouped by <strong>provider</strong> — the vendor you have an
+			account with. In code, a provider is a tiny factory that binds together a
+			catalog, authentication, and a wire-protocol implementation. Here is the
+			<em>entire</em> Anthropic provider:
+		</p>
+		<figure class="code">
+			<figcaption><span>packages/ai/src/providers/anthropic.ts</span><span class="lines">verbatim, whole file</span></figcaption>
+			<pre><code class="language-typescript">export function anthropicProvider(): Provider&lt;"anthropic-messages"&gt; {
+	return createProvider({
+		id: "anthropic",
+		name: "Anthropic",
+		baseUrl: "https://api.anthropic.com",
+		auth: {
+			// ANTHROPIC_OAUTH_TOKEN takes precedence over ANTHROPIC_API_KEY
+			apiKey: envApiKeyAuth("Anthropic API key", ["ANTHROPIC_OAUTH_TOKEN", "ANTHROPIC_API_KEY"]),
+			oauth: lazyOAuth({ name: "Anthropic (Claude Pro/Max)", load: loadAnthropicOAuth }),
+		},
+		models: Object.values(ANTHROPIC_MODELS),
+		api: anthropicMessagesApi(),
+	});
+}</code></pre>
+		</figure>
+		<p>
+			Twenty lines, four decisions: <em>who</em> (id, baseUrl), <em>how to log
+			in</em> (an environment-variable API key, or an OAuth flow for
+			Claude subscription accounts), <em>what's on the menu</em> (the generated
+			catalog), and <em>which dialect to speak</em> (the anthropic-messages
+			adapter — next module's subject). Most of the 35 provider files look just
+			like this; many are shorter, because they reuse the OpenAI-compatible
+			adapter and differ only in URL and models.
+		</p>
+
+		<h2>The runtime: cost accounting</h2>
+		<p>
+			The metadata isn't decorative. Every response's token counts are priced
+			through one function:
+		</p>
+		<figure class="code">
+			<figcaption><span>packages/ai/src/models.ts</span><span class="lines">calculateCost, verbatim</span></figcaption>
+			<pre><code class="language-typescript">export function calculateCost&lt;TApi extends Api&gt;(model: Model&lt;TApi&gt;, usage: Usage): Usage["cost"] {
+	// Anthropic charges 2x base input for 1h cache writes.
+	const longWrite = usage.cacheWrite1h ?? 0;
+	const shortWrite = usage.cacheWrite - longWrite;
+	usage.cost.input = (model.cost.input / 1000000) * usage.input;
+	usage.cost.output = (model.cost.output / 1000000) * usage.output;
+	usage.cost.cacheRead = (model.cost.cacheRead / 1000000) * usage.cacheRead;
+	usage.cost.cacheWrite = (model.cost.cacheWrite * shortWrite + model.cost.input * 2 * longWrite) / 1000000;
+	usage.cost.total = usage.cost.input + usage.cost.output + usage.cost.cacheRead + usage.cost.cacheWrite;
+	return usage.cost;
+}</code></pre>
+		</figure>
+
+		<aside class="concept" data-kind="llm">
+			<p class="concept-label">LLM · What tokens cost, and why four prices</p>
+			<p>
+				Models bill per million <em>tokens</em> (a token ≈ ¾ of an English
+				word), with separate rates for <strong>input</strong> (everything you
+				send — remember, the whole conversation, every turn) and
+				<strong>output</strong> (what the model generates), output typically
+				5× dearer. The two cache rates belong to <em>prompt caching</em>
+				(lesson 4.6): providers will remember a prefix of your prompt for a
+				few minutes, then charge ~10% of the input rate to <em>re-read</em> it
+				— a 90% discount on an agent's biggest expense, since each loop turn
+				resends a growing transcript. Writing the cache costs a small premium,
+				and Anthropic's 1-hour retention tier costs more still — hence the
+				special case in the code, and the <code>cacheWrite1h</code> field you
+				may have wondered about in <code>Usage</code>. Pricing quirks ripple
+				all the way into type definitions.
+			</p>
+		</aside>
+
+		<h2>The collection: <code>Models</code></h2>
+		<p>
+			One object ties it together: a <code>Models</code> collection built from
+			all registered providers, with lookups like
+			<code>getModel("anthropic", "claude-sonnet-4-5")</code>, dynamic refresh
+			for aggregators whose catalogs change daily
+			(<code>refreshModels()</code> — note the in-flight deduplication in
+			<code>createProvider</code>, so concurrent refreshes don't stampede), and
+			auth resolution. The coding agent wraps this in its own
+			<code>ModelRegistry</code> with settings and custom entries; extensions
+			can register whole new providers (Module 8). Every layer asks this
+			collection one question: <em>given a provider and an id, give me the
+			metadata and a function to stream with</em>.
+		</p>
+
+		<figure class="diagram">
+			<div class="drow">
+				<div class="dbox"><span class="dbox-title">*.models.ts × 35</span><span class="dbox-sub">generated catalogs (~18.7k lines)</span></div>
+				<span class="darrow">→</span>
+				<div class="dbox"><span class="dbox-title">provider factories</span><span class="dbox-sub">catalog + auth + adapter</span></div>
+				<span class="darrow">→</span>
+				<div class="dbox accent"><span class="dbox-title">Models collection</span><span class="dbox-sub">lookup · refresh · auth</span></div>
+				<span class="darrow">→</span>
+				<div class="dbox"><span class="dbox-title">stream(model, context)</span><span class="dbox-sub">the only verb that matters</span></div>
+			</div>
+		</figure>
+
+		<h2>What you now know</h2>
+		<p>
+			Models are typed records in generated catalogs; providers are 20-line
+			bindings of catalog + auth + adapter; and cost is computed, not guessed,
+			from per-model price tables. Next: the event grammar — the full
+			discriminated union that every streaming response in pi is narrated in.
+		</p>
+	</article>
+	<script src="../manifest.js"></script>
+	<script src="../assets/vendor/highlight.min.js"></script>
+	<script src="../assets/js/app.js" defer></script>
+</body>
+</html>

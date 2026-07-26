@@ -1,0 +1,160 @@
+<!doctype html>
+<html lang="en">
+<head>
+	<meta charset="utf-8">
+	<meta name="viewport" content="width=device-width, initial-scale=1">
+	<title>OAuth and the faux provider · pi · Codebase Academy</title>
+	<link rel="stylesheet" href="../assets/css/site.css">
+</head>
+<body>
+	<article class="lesson">
+		<h1>OAuth and the faux provider</h1>
+		<p class="lede">
+			Two loose ends close out the pi-ai layer: how <code>/login</code>
+			actually works when you have a Claude or Copilot <em>subscription</em>
+			instead of an API key, and the scripted fake model that lets 250+ tests
+			exercise the whole stack for zero dollars. Both are skims by design —
+			concepts, not line-by-line.
+		</p>
+
+		<h2>Part 1: logging in without an API key</h2>
+		<p>
+			API keys are simple: an environment variable, a header, done — that's
+			the <code>envApiKeyAuth</code> line you read in the Anthropic provider
+			(lesson 3.3). But subscriptions (Claude Pro/Max, GitHub Copilot, ChatGPT
+			plans) don't hand out long-lived keys. They use <strong>OAuth</strong>:
+			you prove your identity in a browser; the app receives
+			<em>tokens</em>. pi ships full flows for Anthropic, GitHub Copilot, and
+			OpenAI Codex — about 2,000 lines under
+			<code class="path">packages/ai/src/utils/oauth/</code>.
+		</p>
+		<figure class="diagram">
+			<div class="drow">
+				<div class="dbox"><span class="dbox-title">pi: /login</span><span class="dbox-sub">opens browser with challenge</span></div>
+				<span class="darrow">→</span>
+				<div class="dbox"><span class="dbox-title">you, in a browser</span><span class="dbox-sub">approve on the provider's site</span></div>
+				<span class="darrow">→</span>
+				<div class="dbox"><span class="dbox-title">provider</span><span class="dbox-sub">redirects back a one-time code</span></div>
+				<span class="darrow">→</span>
+				<div class="dbox accent"><span class="dbox-title">tokens</span><span class="dbox-sub">short-lived access + long-lived refresh</span></div>
+			</div>
+			<figcaption class="dcaption">The PKCE authorization-code dance — a challenge/verifier pair prevents interception; pi implements it in oauth/pkce.ts.</figcaption>
+		</figure>
+		<p>Three engineering points worth keeping, even at flyover altitude:</p>
+		<ul>
+			<li>
+				<strong>Tokens expire; design for mid-session refresh.</strong> Access
+				tokens last minutes-to-hours. Now the odd detail from lesson 2.4 pays
+				off: the agent loop resolves the API key <em>fresh on every model
+				call</em> precisely because "the key" may need to be a just-refreshed
+				token.
+			</li>
+			<li>
+				<strong>Refresh must be serialized.</strong> If parallel requests both
+				notice an expired token, both might refresh — and some providers
+				invalidate the older token, logging you out at random. pi's
+				credential store wraps updates in a serialized read-modify-write
+				(<code>CredentialStore.modify()</code>) so exactly one refresh wins.
+				Classic concurrency bug, solved where the data lives.
+			</li>
+			<li>
+				<strong>Auth is data, not code.</strong> A provider's auth block just
+				declares <em>ways to get a credential</em> (env key, OAuth flow);
+				resolution happens in one place (<code>src/auth/resolve.ts</code>).
+				That's why extensions can add whole new login flows (Module 8) —
+				they're just supplying another record.
+			</li>
+		</ul>
+		<p>
+			And the stealth-mode digression from lesson 4.2 completes the picture:
+			OAuth sessions get Claude-Code-style tool names because the
+			subscription endpoint expects Anthropic's own client. Auth mode even
+			changes the request payload — one more thing adapters absorb.
+		</p>
+
+		<h2>Part 2: the faux provider</h2>
+		<p>
+			Question from lesson 1.5: how do 294 test files test an AI agent without
+			paying for models? Answer: <code>faux</code> — a 538-line provider whose
+			"model" is a script you write in your test:
+		</p>
+		<figure class="code">
+			<figcaption><span>packages/ai/src/providers/faux.ts</span><span class="lines">the building blocks, verbatim</span></figcaption>
+			<pre><code class="language-typescript">export function fauxText(text: string): TextContent {
+	return { type: "text", text };
+}
+
+export function fauxToolCall(name: string, arguments_: ToolCall["arguments"], options = {}): ToolCall {
+	return {
+		type: "toolCall",
+		id: options.id ?? randomId("tool"),
+		name,
+		arguments: arguments_,
+	};
+}</code></pre>
+		</figure>
+		<p>A test scripts a conversation like a playwright:</p>
+		<figure class="code">
+			<figcaption><span>test code</span><span class="lines">shape of a faux-driven agent test</span></figcaption>
+			<pre><code class="language-typescript">const faux = createFauxProvider({
+	responses: [
+		fauxAssistantMessage([
+			fauxText("I'll take a look at the file."),
+			fauxToolCall("read", { path: "package.json" }),
+		]),
+		fauxAssistantMessage([fauxText("This file defines your project's metadata...")]),
+	],
+});
+// run the real agent loop against it, then assert:
+// - the read tool actually executed
+// - the tool result entered the context
+// - the session file contains all four messages</code></pre>
+		</figure>
+		<p>
+			The faux provider implements the same two-function
+			<code>ProviderStreams</code> interface as every real adapter — it even
+			<em>streams</em>, chopping its scripted text into deltas of 3–5
+			characters so consumers experience realistic event sequences. Everything
+			above the interface line — loop, tools, session persistence, compaction,
+			extensions — runs completely real, deterministic, offline, free. The
+			repo's own rules mandate it: agent tests use the faux provider,
+			"no real provider APIs, keys, or paid tokens."
+		</p>
+
+		<aside class="concept" data-kind="eng">
+			<p class="concept-label">Engineering · Test doubles at the network boundary</p>
+			<p>
+				A <strong>fake</strong> is a working implementation taking a shortcut
+				(faux: scripted answers instead of a neural network) — distinct from
+				a <em>mock</em>, which just records calls. Fakes shine when placed at
+				a <em>natural seam</em>, and the best seam is almost always the
+				network boundary: substitute the expensive/nondeterministic remote
+				thing, keep 100% of your own code under test.
+			</p>
+			<p>
+				The transferable rule: <strong>the quality of your abstractions
+				determines the quality of your tests</strong>. Because pi routed all
+				providers through one small interface, a fake provider slots in with
+				zero special-casing — the agent genuinely cannot tell. If your code
+				is hard to test, the fix is usually not better mocks; it's a
+				boundary like this one. (Python: an httpx MockTransport, or a fake
+				implementing your repository protocol.)
+			</p>
+		</aside>
+
+		<h2>Module 4 — and the whole pi-ai layer — complete</h2>
+		<p>
+			Take stock: you can now read a provider's wire dialect (4.2), reason
+			about vendor drift (4.3), transient failure (4.4), malformed output
+			(4.5), token economics (4.6), and auth lifecycles — plus the fake that
+			makes it all testable. Everything the rest of pi does happens
+			<em>above</em> the <code>ProviderStreams</code> line, in the vocabulary
+			of Module 3. Next stop: the agent layer proper, where the loop you've
+			been circling finally gets read line by line.
+		</p>
+	</article>
+	<script src="../manifest.js"></script>
+	<script src="../assets/vendor/highlight.min.js"></script>
+	<script src="../assets/js/app.js" defer></script>
+</body>
+</html>

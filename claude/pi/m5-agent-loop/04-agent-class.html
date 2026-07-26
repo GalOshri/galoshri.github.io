@@ -1,0 +1,203 @@
+<!doctype html>
+<html lang="en">
+<head>
+	<meta charset="utf-8">
+	<meta name="viewport" content="width=device-width, initial-scale=1">
+	<title>The Agent class · pi · Codebase Academy</title>
+	<link rel="stylesheet" href="../assets/css/site.css">
+</head>
+<body>
+	<article class="lesson">
+		<h1>The Agent class</h1>
+		<p class="lede">
+			<code>runLoop</code> is stateless by design — so something must hold the
+			conversation, fan out the events, and own the queues and the abort
+			switch. That's <code>Agent</code>: 575 lines of careful custody around a
+			pure core.
+		</p>
+
+		<h2>What it owns</h2>
+		<figure class="code">
+			<figcaption><span>packages/agent/src/agent.ts</span><span class="lines">the class head, abridged</span></figcaption>
+			<pre><code class="language-typescript">export class Agent {
+	private _state: MutableAgentState;
+	private readonly listeners = new Set&lt;(event: AgentEvent, signal: AbortSignal) =&gt; Promise&lt;void&gt; | void&gt;();
+	private readonly steeringQueue: PendingMessageQueue;
+	private readonly followUpQueue: PendingMessageQueue;
+
+	public convertToLlm: (messages: AgentMessage[]) =&gt; Message[] | Promise&lt;Message[]&gt;;
+	public transformContext?: (messages: AgentMessage[], signal?: AbortSignal) =&gt; Promise&lt;AgentMessage[]&gt;;
+	public streamFn: StreamFn;
+	public getApiKey?: (provider: string) =&gt; Promise&lt;string | undefined&gt; | string | undefined;
+	public beforeToolCall?: (context: BeforeToolCallContext, signal?: AbortSignal) =&gt; Promise&lt;...&gt;;
+	public afterToolCall?: (context: AfterToolCallContext, signal?: AbortSignal) =&gt; Promise&lt;...&gt;;
+	public prepareNextTurn?: (...) =&gt; ...;
+	private activeRun?: ActiveRun;
+	// ...
+}</code></pre>
+		</figure>
+		<p>
+			Recognize the public fields? They're the loop's config hooks from the
+			last two lessons, surfaced as plain assignable properties. The Agent is
+			the <em>binding site</em>: an application (or extension) sets
+			<code>agent.beforeToolCall = ...</code>, and on each run the Agent snapshots
+			these into the config it hands <code>runLoop</code>. Private, it keeps:
+			the state, the listeners, the two queues, and the active run's abort
+			controller.
+		</p>
+		<p>
+			<code>AgentState</code> (from <code>types.ts</code>) is the UI-facing
+			readout: <code>systemPrompt</code>, <code>model</code>,
+			<code>thinkingLevel</code>, <code>tools</code>, <code>messages</code>,
+			plus live run flags — <code>isStreaming</code>,
+			<code>streamingMessage</code>, <code>pendingToolCalls</code>,
+			<code>errorMessage</code>. Everything pi's footer and spinners display
+			is a render of this object.
+		</p>
+
+		<h2>The reducer</h2>
+		<p>
+			Every event the loop emits passes through one method that <em>first</em>
+			folds it into state, <em>then</em> notifies the audience:
+		</p>
+		<figure class="code">
+			<figcaption><span>packages/agent/src/agent.ts</span><span class="lines">processEvents, abridged</span></figcaption>
+			<pre><code class="language-typescript">private async processEvents(event: AgentEvent): Promise&lt;void&gt; {
+	switch (event.type) {
+		case "message_start":
+		case "message_update":
+			this._state.streamingMessage = event.message;
+			break;
+		case "message_end":
+			this._state.streamingMessage = undefined;
+			this._state.messages.push(event.message);
+			break;
+		case "tool_execution_start": {
+			const pendingToolCalls = new Set(this._state.pendingToolCalls);
+			pendingToolCalls.add(event.toolCallId);
+			this._state.pendingToolCalls = pendingToolCalls;
+			break;
+		}
+		// ...tool_execution_end, turn_end, agent_end
+	}
+
+	const signal = this.activeRun?.abortController.signal;
+	for (const listener of this.listeners) {
+		await listener(event, signal);
+	}
+}</code></pre>
+		</figure>
+		<p>
+			If you've met Redux or Elm, this is a reducer: <code>state = f(state,
+			event)</code>, with the event log as the source of truth. And then the
+			consequential little line: <code>await listener(...)</code> — in
+			registration order, <em>every listener, awaited</em>.
+		</p>
+
+		<aside class="concept" data-kind="eng">
+			<p class="concept-label">Engineering · Backpressure, or: why await your listeners</p>
+			<p>
+				The cheap way to broadcast is fire-and-forget: call listeners, don't
+				wait. Fast — and it lets a slow consumer fall arbitrarily far behind
+				the producer while events pile up in memory. pi chooses the opposite:
+				the <em>loop itself does not advance</em> until every subscriber has
+				finished with the event. The session file has the message before the
+				next model call starts; the UI is never rendering a stale world;
+				an extension's veto genuinely happened before the next step.
+			</p>
+			<p>
+				This is <strong>backpressure</strong> — consumers throttling
+				producers — the same idea as bounded queues in classic
+				producer/consumer designs. The price is honest: one slow listener
+				slows the whole agent. pi pays it because an agent's event rate is
+				modest and <em>correctness of the record</em> (that JSONL file is a
+				crash-safe audit log only if writes settle in order) beats raw
+				throughput. Know which side of that trade your system needs.
+			</p>
+		</aside>
+
+		<h2>Queues with a personality</h2>
+		<figure class="code">
+			<figcaption><span>packages/agent/src/agent.ts</span><span class="lines">PendingMessageQueue.drain, verbatim</span></figcaption>
+			<pre><code class="language-typescript">drain(): AgentMessage[] {
+	if (this.mode === "all") {
+		const drained = this.messages.slice();
+		this.messages = [];
+		return drained;
+	}
+
+	const first = this.messages[0];
+	if (!first) return [];
+	this.messages = this.messages.slice(1);
+	return [first];
+}</code></pre>
+		</figure>
+		<p>
+			<code>steer()</code> and <code>followUp()</code> feed two of these; the
+			loop's <code>getSteeringMessages</code>/<code>getFollowUpMessages</code>
+			hooks drain them. The <code>mode</code> matters more than it looks:
+			default is <code>"one-at-a-time"</code>, so if you fired off three
+			steering thoughts while the model worked, they arrive <em>one per
+			turn</em> — each getting its own model response — rather than as a
+			confusing pile. A four-line method encoding a UX decision.
+		</p>
+
+		<h2>Run lifecycle: the safety wrapper</h2>
+		<figure class="code">
+			<figcaption><span>packages/agent/src/agent.ts</span><span class="lines">runWithLifecycle + failure path, abridged</span></figcaption>
+			<pre><code class="language-typescript">private async runWithLifecycle(executor: (signal: AbortSignal) =&gt; Promise&lt;void&gt;): Promise&lt;void&gt; {
+	if (this.activeRun) throw new Error("Agent is already processing.");
+
+	const abortController = new AbortController();
+	this.activeRun = { promise, resolve: resolvePromise, abortController };
+	this._state.isStreaming = true;
+
+	try {
+		await executor(abortController.signal);
+	} catch (error) {
+		await this.handleRunFailure(error, abortController.signal.aborted);
+	} finally {
+		this.finishRun();
+	}
+}
+
+private async handleRunFailure(error: unknown, aborted: boolean): Promise&lt;void&gt; {
+	const failureMessage = {
+		role: "assistant",
+		content: [{ type: "text", text: "" }],
+		stopReason: aborted ? "aborted" : "error",
+		errorMessage: error instanceof Error ? error.message : String(error),
+		// ...model info, empty usage, timestamp
+	} satisfies AgentMessage;
+	await this.processEvents({ type: "message_start", message: failureMessage });
+	await this.processEvents({ type: "message_end", message: failureMessage });
+	await this.processEvents({ type: "turn_end", message: failureMessage, toolResults: [] });
+	await this.processEvents({ type: "agent_end", messages: [failureMessage] });
+}</code></pre>
+		</figure>
+		<p>
+			The last line of defense: if something <em>does</em> throw past all the
+			nets below (a bug, not a provider failure), the Agent synthesizes a
+			proper error <code>AssistantMessage</code> and plays the full event
+			ceremony for it — so the UI shows it, the session records it, and every
+			subscriber sees a well-formed ending. Even bugs die as data. Note also
+			the one-run-at-a-time guard and the guarantee behind
+			<code>isStreaming</code>: it stays true until <code>agent_end</code>
+			listeners settle — "idle" means <em>everyone</em> is done, not just the
+			loop.
+		</p>
+
+		<h2>What you now know</h2>
+		<p>
+			<code>Agent</code> = state reducer + awaited broadcast + two politeness
+			queues + abort switch + last-resort error envelope, wrapped around the
+			stateless loop. This completes the machinery the coding agent builds on.
+			But the library offers one more layer — a whole "batteries included"
+			harness — and its story has a twist. That's next.
+		</p>
+	</article>
+	<script src="../manifest.js"></script>
+	<script src="../assets/vendor/highlight.min.js"></script>
+	<script src="../assets/js/app.js" defer></script>
+</body>
+</html>

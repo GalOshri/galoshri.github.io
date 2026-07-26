@@ -1,0 +1,122 @@
+<!doctype html>
+<html lang="en">
+<head>
+	<meta charset="utf-8">
+	<meta name="viewport" content="width=device-width, initial-scale=1">
+	<title>Session persistence · pi · Codebase Academy</title>
+	<link rel="stylesheet" href="../assets/css/site.css">
+</head>
+<body>
+	<article class="lesson">
+		<h1>Session persistence</h1>
+		<p class="lede">
+			You met the session file in lesson 2.7 as a reader; this module owns it
+			as an engineer. <code>SessionManager</code> (1,611 lines) is the coding
+			agent's memory organ — and its design decisions echo databases far more
+			than chat apps.
+		</p>
+
+		<h2>The write path: one line, synchronously</h2>
+		<figure class="code">
+			<figcaption><span>packages/coding-agent/src/core/session-manager.ts</span><span class="lines">_persist, abridged</span></figcaption>
+			<pre><code class="language-typescript">_persist(entry: SessionEntry): void {
+	// ...create session file with header on first write...
+	appendFileSync(this.sessionFile, `${JSON.stringify(entry)}\n`);
+}
+
+appendMessage(message: Message | CustomMessage | BashExecutionMessage): string {
+	// build a MessageEntry { type: "message", id, parentId, message }
+	this._persist(entry);
+	// ...
+}</code></pre>
+		</figure>
+		<p>
+			Two choices worth pausing on. <strong><code>appendFileSync</code></strong> —
+			the <em>synchronous</em> variant, in a codebase that's async everywhere
+			else. Deliberate: an append of one JSON line is microseconds, and doing
+			it synchronously means the entry is durably queued for disk before
+			<em>anything</em> else proceeds — no interleaving hazards, no "the
+			process died with writes in flight." Remember the awaited-listener
+			guarantee (lesson 5.4)? The session subscriber runs this persist inside
+			<code>message_end</code>, so <em>the loop cannot start the next model
+			call until the current message is on disk</em>. Crash-safety by
+			composition of two small guarantees.
+		</p>
+		<p>
+			And <strong>who calls it</strong>: the thread you traced in lesson 6.3 —
+			<code>AgentSession._handleAgentEvent</code>, case
+			<code>message_end</code>. Persistence is just another subscriber to the
+			broadcast; the loop doesn't know disk exists.
+		</p>
+
+		<h2>What gets persisted: more than messages</h2>
+		<p>
+			The entry-type vocabulary matches the harness tree from lesson 5.5
+			almost one-for-one (this is the parallel implementation from the plot
+			twist): <code>message</code>, <code>model_change</code>,
+			<code>thinking_level_change</code>, <code>compaction</code>,
+			<code>branch_summary</code>, <code>custom</code>, <code>label</code>,
+			<code>session_info</code>. Every configuration change is a fact in the
+			log, so replay reconstructs not just the words but the circumstances.
+			The extended message roles (lesson 5.1's declaration merging, realized):
+			<code>bashExecution</code> for commands <em>you</em> ran with the
+			<code>!</code> prefix, <code>custom</code> for extension data — each
+			with an <code>excludeFromContext</code>-style say over what the model
+			later sees.
+		</p>
+
+		<h2>Reading it back: buildSessionContext</h2>
+		<p>
+			On <code>pi --resume</code> (or <code>/resume</code>), the manager
+			parses the JSONL, walks root-to-leaf, and folds the entries into a
+			<code>SessionContext</code> — the same reducer pattern as the harness's
+			version (lesson 5.5): messages accumulate, the last
+			<code>model_change</code> wins, a <code>compaction</code> entry resets
+			the visible-message window. Then version migrations: the header
+			records a format version (currently 3), and old files upgrade on load —
+			v1 linear sessions become trees, renamed roles get mapped. Your
+			conversations from three months of pi versions ago still open. That's
+			what a stable on-disk format costs and buys.
+		</p>
+
+		<h2>Where files live, and the lifecycle</h2>
+		<figure class="code">
+			<figcaption><span>packages/coding-agent/docs/session-format.md</span></figcaption>
+			<pre><code class="language-text">~/.pi/agent/sessions/--Users-you-my-project--/2026-07-04T15-30-00_a1b2c3.jsonl</code></pre>
+		</figure>
+		<p>
+			Directory per working directory (slashes → dashes), file per
+			conversation, named by timestamp + UUID. No database, no index — the
+			filesystem <em>is</em> the database. Listing your sessions for
+			<code>/resume</code> is a directory read; deleting a conversation is
+			deleting a file; backup is copying a folder. For single-user local
+			data with this write pattern, files beat SQLite on every axis that
+			matters here: transparency (you can <code>cat</code> your history),
+			robustness (no schema migrations for a DB engine), and grep-ability.
+		</p>
+
+		<div class="callout note">
+			<span class="callout-label">Note · the session file is an API</span>
+			<p>
+				Because the format is documented (<code>docs/session-format.md</code>)
+				and stable, other programs build on it: cost-analysis scripts in the
+				repo's <code>scripts/</code> read session files; exporters turn them
+				into HTML; the <code>/share</code> command uploads them. When a file
+				format outlives any single feature, treat it as a public API —
+				version it, document it, migrate it. pi does all three.
+			</p>
+		</div>
+
+		<h2>What you now know</h2>
+		<p>
+			Persistence = a synchronous one-line append per event, from an ordinary
+			broadcast subscriber, into a versioned, documented JSONL tree under
+			<code>~/.pi</code>. The tree part — those <code>parentId</code>s doing
+			real work — is next: branching, forking, and time travel.
+		</p>
+	</article>
+	<script src="../manifest.js"></script>
+	<script src="../assets/vendor/highlight.min.js"></script>
+	<script src="../assets/js/app.js" defer></script>
+</body>
+</html>

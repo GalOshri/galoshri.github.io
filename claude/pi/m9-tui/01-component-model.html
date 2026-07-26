@@ -1,0 +1,143 @@
+<!doctype html>
+<html lang="en">
+<head>
+	<meta charset="utf-8">
+	<meta name="viewport" content="width=device-width, initial-scale=1">
+	<title>The component model · pi · Codebase Academy</title>
+	<link rel="stylesheet" href="../assets/css/site.css">
+</head>
+<body>
+	<article class="lesson">
+		<h1>The component model</h1>
+		<p class="lede">
+			Last module of real code. <code>pi-tui</code> is a UI framework built
+			on the humblest of foundations — a grid of characters — and its core
+			abstraction is four members long. If you've ever wondered what React
+			would look like reduced to its essence, this is the module.
+		</p>
+
+		<h2>The whole framework's contract</h2>
+		<figure class="code">
+			<figcaption><span>packages/tui/src/tui.ts</span><span class="lines">Component + Focusable, comments trimmed</span></figcaption>
+			<pre><code class="language-typescript">export interface Component {
+	/** Render the component to lines for the given viewport width */
+	render(width: number): string[];
+
+	/** Optional handler for keyboard input when component has focus */
+	handleInput?(data: string): void;
+
+	/** If true, component receives key release events (Kitty protocol). */
+	wantsKeyRelease?: boolean;
+
+	/** Invalidate any cached rendering state. */
+	invalidate(): void;
+}
+
+export interface Focusable {
+	/** Set by TUI when focus changes. Component should emit CURSOR_MARKER when true. */
+	focused: boolean;
+}</code></pre>
+		</figure>
+		<p>
+			A component is anything that can answer: <em>given this width, what
+			lines are you?</em> Not pixels, not boxes — an array of strings,
+			one per terminal row, ANSI color codes included. Composition is
+			then almost a joke:
+		</p>
+		<figure class="code">
+			<figcaption><span>packages/tui/src/tui.ts</span><span class="lines">Container, essence</span></figcaption>
+			<pre><code class="language-typescript">class Container implements Component {
+	protected children: Component[] = [];
+
+	render(width: number): string[] {
+		const lines: string[] = [];
+		for (const child of this.children) {
+			lines.push(...child.render(width));
+		}
+		return lines;
+	}
+}</code></pre>
+		</figure>
+		<p>
+			Concatenate the children's lines. The screen — the <code>TUI</code>
+			class itself — <em>is</em> a Container: pi's interactive mode is a list
+			of message components, tool components, a spacer, and the editor,
+			stacked. There is no layout engine, no flexbox, no absolute
+			positioning; vertical stacking is the only layout, and everything
+			else (columns, borders, padding) is a component formatting its own
+			strings. Constraint as simplicity: the terminal scrolls vertically,
+			so the model matches.
+		</p>
+
+		<h2>Where the React instincts map — and where they don't</h2>
+		<table>
+			<thead><tr><th>React idea</th><th>pi-tui equivalent</th></tr></thead>
+			<tbody>
+				<tr><td>render() → virtual DOM</td><td><code>render(width)</code> → <code>string[]</code></td></tr>
+				<tr><td>reconciliation / diffing</td><td>line-by-line frame diff (next lesson)</td></tr>
+				<tr><td>setState triggers re-render</td><td>mutate yourself, call <code>tui.requestRender()</code></td></tr>
+				<tr><td>memoization</td><td>cache your lines; <code>invalidate()</code> drops the cache</td></tr>
+				<tr><td>controlled focus / refs</td><td><code>Focusable</code> + <code>CURSOR_MARKER</code></td></tr>
+			</tbody>
+		</table>
+		<p>
+			The big philosophical difference: <strong>no reactivity</strong>.
+			Components are plain mutable objects; nothing tracks your state or
+			re-renders "automatically." You change a field, you request a render.
+			That's less magical than React and dramatically easier to debug — the
+			entire mental model is "someone will call <code>render()</code> soon;
+			return the right strings."
+		</p>
+		<p>
+			Caching matters because renders happen up to 60×/second while
+			streaming. A chat message whose Markdown hasn't changed shouldn't
+			re-tokenize itself every frame — components memoize their line arrays
+			and rebuild only when their content changes (or when
+			<code>invalidate()</code> announces a theme change or width-sensitive
+			reset). <code>render(width)</code> being <em>width-dependent</em> is
+			the subtle part: resize the terminal and every cache is stale, which
+			is one reason resizes trigger the full-redraw path you'll meet next
+			lesson.
+		</p>
+
+		<h2>The cursor trick</h2>
+		<p>
+			One puzzle a string-based UI must solve: the terminal has a single
+			hardware cursor, and the focused editor needs it placed at the typing
+			position (IMEs — for Chinese/Japanese input — draw their candidate
+			windows there). But a component only returns strings… so the focused
+			component embeds a zero-width marker — <code>CURSOR_MARKER</code>, an
+			escape sequence terminals ignore — at its cursor position within its
+			output. The TUI strips the marker during rendering and moves the real
+			cursor to where it was found. In-band signaling, like a watermark:
+			the component speaks only strings, yet communicates a coordinate.
+		</p>
+
+		<h2>The cast of components</h2>
+		<p>
+			With the interface this small, the library is really its component
+			gallery: <code>Text</code>, <code>TruncatedText</code>,
+			<code>Input</code>, <code>SelectList</code>, <code>SettingsList</code>,
+			<code>Loader</code>/<code>CancellableLoader</code> (the spinners),
+			<code>Image</code> (inline terminal graphics!), <code>Markdown</code>
+			(lesson 9.6), and the 2,300-line <code>Editor</code> (lesson 9.5).
+			Every chat bubble, diff view, and model-picker dialog you see in pi is
+			one of these or a composition of them — and extensions register their
+			own renderers into the same tree (8.1), because a component is just
+			an object with <code>render()</code>.
+		</p>
+
+		<h2>What you now know</h2>
+		<p>
+			pi-tui = "components are functions from width to lines" + vertical
+			concatenation + explicit render requests + an in-band cursor marker.
+			Everything interesting hides in one question we've deferred: when the
+			lines change, how do they reach the screen without flicker? Next
+			lesson: the differential renderer, the reason pi feels fast.
+		</p>
+	</article>
+	<script src="../manifest.js"></script>
+	<script src="../assets/vendor/highlight.min.js"></script>
+	<script src="../assets/js/app.js" defer></script>
+</body>
+</html>

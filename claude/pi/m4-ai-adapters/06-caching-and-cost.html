@@ -1,0 +1,146 @@
+<!doctype html>
+<html lang="en">
+<head>
+	<meta charset="utf-8">
+	<meta name="viewport" content="width=device-width, initial-scale=1">
+	<title>Prompt caching and the cost ledger · pi · Codebase Academy</title>
+	<link rel="stylesheet" href="../assets/css/site.css">
+</head>
+<body>
+	<article class="lesson">
+		<h1>Prompt caching and the cost ledger</h1>
+		<p class="lede">
+			An agent's dirty secret: it re-sends an ever-growing transcript on every
+			single turn. Without countermeasures, a long session's bill grows
+			<em>quadratically</em>. This lesson covers the countermeasure — prompt
+			caching — and the bookkeeping that lets pi print an honest price at the
+			bottom of your screen.
+		</p>
+
+		<h2>The quadratic problem</h2>
+		<p>
+			Statelessness (lesson 2.2) has a price. Turn 1 sends the system prompt +
+			your message: say 5,000 tokens. Turn 2 resends all of that plus the tool
+			result: 15,000. Turn 10 might send 80,000 — <em>and you pay input rates
+			on all of them, every turn</em>. Sum over a session and the transcript
+			you re-uploaded dominates everything else you ever paid for.
+		</p>
+
+		<aside class="concept" data-kind="llm">
+			<p class="concept-label">LLM · Prompt caching economics</p>
+			<p>
+				Providers noticed that consecutive requests usually share a huge
+				prefix — same system prompt, same tools, same early conversation. So
+				they offer a deal: mark the shared prefix, and the provider keeps its
+				processed form (the model's internal key/value state) warm for a few
+				minutes. On the next request, re-reading the cached prefix costs
+				~10% of the normal input rate — Claude Sonnet: $3.00/M fresh vs
+				$0.30/M cached. Writing the cache costs a ~25% premium ($3.75/M),
+				and Anthropic's 1-hour retention tier costs 2× base input.
+			</p>
+			<p>
+				The catch: caches match by <em>exact prefix</em>. Change one early
+				byte — reorder a tool, tweak the system prompt mid-session — and
+				everything after that byte re-runs at full price. That's why agent
+				harnesses are fanatical about keeping context <em>append-only</em>:
+				pi's conversation only ever grows at the end, precisely so the
+				prefix stays byte-stable. A data-structure decision (lesson 2.7's
+				append-only instinct) turns out to be a pricing strategy.
+			</p>
+		</aside>
+
+		<h2>How pi marks the cache</h2>
+		<p>
+			You saw the mechanism in the Anthropic deep dive: <code>getCacheControl</code>
+			builds an ephemeral marker (with optional 1h TTL), which the request
+			builder attaches at the strategic spots — the system prompt, the last
+			tool definition, and the last messages. Everything up to a marker is
+			cacheable prefix. The user-facing knob is one enum, normalized across
+			providers:
+		</p>
+		<figure class="code">
+			<figcaption><span>packages/ai/src/types.ts</span><span class="lines">the cache knob + its per-provider fate</span></figcaption>
+			<pre><code class="language-typescript">export type CacheRetention = "none" | "short" | "long";
+
+// anthropic-messages:  cache_control: { type: "ephemeral", ttl?: "1h" }
+// openai-*:            prompt_cache_retention: "24h" (+ session_id header affinity)
+// openai-compatibles:  per compat flags: cacheControlFormat, supportsLongCacheRetention,
+//                      sendSessionAffinityHeaders (Fireworks routes by session for cache hits)</code></pre>
+		</figure>
+		<p>
+			Three providers, three unrelated wire mechanisms (explicit markers;
+			retention field; session-affinity routing) — one option. The compat
+			flags from lesson 4.3 make their return here doing real work. This is
+			the unification pattern at its best: the coding agent just says
+			<code>cacheRetention: "short"</code> and each adapter does whatever its
+			dialect requires.
+		</p>
+
+		<h2>The ledger: Usage and calculateCost</h2>
+		<p>
+			Every response reports its token counts, which the adapter parses into
+			the <code>Usage</code> record you met in <code>types.ts</code> — input,
+			output, cacheRead, cacheWrite, plus the odd little
+			<code>cacheWrite1h</code>. Now the pricing function from lesson 3.3
+			reads as a complete story:
+		</p>
+		<figure class="code">
+			<figcaption><span>packages/ai/src/models.ts</span><span class="lines">calculateCost, verbatim</span></figcaption>
+			<pre><code class="language-typescript">export function calculateCost&lt;TApi extends Api&gt;(model: Model&lt;TApi&gt;, usage: Usage): Usage["cost"] {
+	// Anthropic charges 2x base input for 1h cache writes.
+	const longWrite = usage.cacheWrite1h ?? 0;
+	const shortWrite = usage.cacheWrite - longWrite;
+	usage.cost.input = (model.cost.input / 1000000) * usage.input;
+	usage.cost.output = (model.cost.output / 1000000) * usage.output;
+	usage.cost.cacheRead = (model.cost.cacheRead / 1000000) * usage.cacheRead;
+	usage.cost.cacheWrite = (model.cost.cacheWrite * shortWrite + model.cost.input * 2 * longWrite) / 1000000;
+	usage.cost.total = usage.cost.input + usage.cost.output + usage.cost.cacheRead + usage.cost.cacheWrite;
+	return usage.cost;
+}</code></pre>
+		</figure>
+		<p>
+			Rates from the generated catalog × counts from the provider = dollars,
+			stamped into the message itself. Since messages persist to the session
+			file with usage intact (lesson 2.7), a session's total cost is just a
+			sum over its JSONL lines. When pi's footer says this conversation cost
+			$0.47, that's not an estimate — it's an audit trail.
+		</p>
+
+		<h2>Reading a cached turn</h2>
+		<p>Here's turn 3 of a real-ish session, decoded:</p>
+		<figure class="code">
+			<figcaption><span>a Usage record</span><span class="lines">annotated</span></figcaption>
+			<pre><code class="language-json">{
+	"input": 212,          // only the newest messages — full price ($3/M)
+	"cacheRead": 14830,    // the whole earlier transcript — 90% off ($0.30/M)
+	"cacheWrite": 655,     // this turn's additions, being cached for next turn
+	"output": 384,         // the model's reply ($15/M)
+	"cost": { "total": 0.01207 }
+}</code></pre>
+		</figure>
+		<p>
+			The signature of a healthy agent session: <code>cacheRead</code> huge,
+			<code>input</code> tiny. If you ever see the opposite — big
+			<code>input</code>, zero <code>cacheRead</code> — something invalidated
+			the prefix, and this record is how you'd notice. The economics of a
+			90-minute pi session hinge on that one field, which is why cache
+			behavior gets compat flags, session-affinity headers, and its own knob:
+			for agents, <strong>caching isn't an optimization; it's what makes long
+			sessions affordable at all</strong>.
+		</p>
+
+		<h2>What you now know</h2>
+		<p>
+			Statelessness makes agents quadratically expensive; exact-prefix caching
+			makes them affordable; append-only context keeps the prefix stable; and
+			pi accounts every token against catalog prices right in the message
+			record. One lesson left in this module: how pi logs into subscription
+			accounts, and the fake provider that makes the whole stack testable for
+			free.
+		</p>
+	</article>
+	<script src="../manifest.js"></script>
+	<script src="../assets/vendor/highlight.min.js"></script>
+	<script src="../assets/js/app.js" defer></script>
+</body>
+</html>

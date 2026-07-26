@@ -1,0 +1,96 @@
+<!doctype html>
+<html lang="en">
+<head>
+	<meta charset="utf-8">
+	<meta name="viewport" content="width=device-width, initial-scale=1">
+	<title>Extending the model side · pi · Codebase Academy</title>
+	<link rel="stylesheet" href="../assets/css/site.css">
+</head>
+<body>
+	<article class="lesson">
+		<h1>Extending the model side</h1>
+		<p class="lede">
+			The deepest extension power: <code>registerProvider</code> replaces or
+			adds the thing that talks to models. It's also where the whole course
+			closes a circle — because implementing a provider means supplying the
+			exact contract you learned in Module 3.
+		</p>
+
+		<h2>What registerProvider takes</h2>
+		<p>The API's own doc examples (from <code class="path">core/extensions/types.ts</code>) sketch the three use cases:</p>
+		<figure class="code">
+			<figcaption><span>packages/coding-agent/src/core/extensions/types.ts</span><span class="lines">registerProvider doc examples, abridged</span></figcaption>
+			<pre><code class="language-typescript">// 1. A proxy/gateway that speaks an existing dialect — just data:
+pi.registerProvider("my-proxy", {
+	baseUrl: "https://llm-proxy.internal.corp",
+	api: "openai-completions",
+	apiKey: "PROXY_API_KEY",           // env var name
+	models: [{ id: "gpt-5", contextWindow: 400000, /* ...costs, caps */ }],
+});
+
+// 2. Override a built-in (same name wins):
+pi.registerProvider("anthropic", { /* your routing, your models */ });
+
+// 3. A fully custom backend — supply the stream function itself:
+pi.registerProvider("corporate-ai", {
+	models: [...],
+	streamSimple: async (model, context, options) =&gt; {
+		const stream = createAssistantMessageEventStream();
+		// ...call anything: internal RPC, local llama, a test script...
+		// push text_delta / toolcall_* / done events as they arrive
+		return stream;
+	},
+});</code></pre>
+		</figure>
+		<p>
+			Case 1 is the corporate reality (every company has a gateway) solved
+			with pure configuration — the compat machinery from lesson 4.3 does the
+			dialect work. Case 3 is the profound one: that <code>streamSimple</code>
+			signature is the <code>StreamFunction</code> contract from lesson 3.6 —
+			return an <code>AssistantMessageEventStream</code> (the push-queue you
+			built by hand in 3.5), emit the twelve-event grammar (3.4), encode
+			failures as <code>error</code> events, never throw. Supply that one
+			function and <em>everything else in this course</em> — loop, tools,
+			sessions, compaction, TUI — works unchanged on top of your backend.
+			A well-designed interface is a teaching syllabus in disguise; you've
+			effectively already learned how to write a provider.
+		</p>
+		<p>
+			(The <code>custom-provider-anthropic</code> example proves the point by
+			reimplementing the whole Anthropic adapter — SSE parsing and all — as
+			a standalone extension; the <code>gitlab-duo</code> example targets an
+			API pi never heard of. Registration also hooks the auth system, so a
+			custom provider can ship its own OAuth login for <code>/login</code> —
+			the lesson 4.7 machinery, also pluggable.)
+		</p>
+
+		<h2>Why the deepest hook matters most</h2>
+		<p>
+			Notice what this does to the dependency diagram from lesson 1.4: user
+			code can now stand <em>below</em> the product, at the pi-ai layer. The
+			extension system doesn't just decorate the agent — it makes every
+			layer's seam public: providers (this lesson), tool I/O
+			(operations/BashOperations, 6.4–6.5), context (transformContext,
+			custom compaction), UI (renderers), commands. The architecture you've
+			studied isn't just clean for maintainers; the cleanliness is the
+			<em>product surface</em>. That's the real meaning of "harness" in
+			"pi agent harness."
+		</p>
+
+		<h2>Module 8 — and the whole agent story — closed</h2>
+		<p>
+			You now hold the complete picture this course promised: what an agent
+			<em>is</em> (a loop), what it's made of (messages, tools, adapters,
+			state, hooks), how it remembers and forgets, and how it's extended —
+			down to swapping the model itself. What remains is the layer that
+			makes it pleasant to sit in front of: Module 9 descends into
+			<code>pi-tui</code>, where strings become pixels and keystrokes become
+			events. It's the most self-contained module — and after the
+			abstractions of the last four, honestly, a joy.
+		</p>
+	</article>
+	<script src="../manifest.js"></script>
+	<script src="../assets/vendor/highlight.min.js"></script>
+	<script src="../assets/js/app.js" defer></script>
+</body>
+</html>

@@ -1,0 +1,712 @@
+<!doctype html>
+<html lang="en">
+<head>
+	<meta charset="utf-8">
+	<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+	<meta name="color-scheme" content="light dark">
+	<title>Reading Rust When You Know Python · Codex Explainer</title>
+	<link rel="stylesheet" href="assets/css/site.css">
+</head>
+<body>
+	<article class="lesson" data-module="m02-reading-rust.html">
+		<h1>Reading Rust When You Know Python</h1>
+		<p class="lede">
+			This module has one job: make every later excerpt readable. It is not a Rust
+			course — you will not learn to <em>write</em> Rust here, and several famously
+			hard topics are deliberately skipped. Every example is real code from Codex, so
+			by the end you will have already read parts of the agent.
+		</p>
+
+		<section class="lesson-section" id="structs-enums" data-minutes="11">
+			<h2>Structs, enums, and the compiler as pair programmer</h2>
+
+			<p>
+				Start with the single most important sentence: <strong>Rust checks types
+				before your program runs, and refuses to compile if they don't line up.</strong>
+				Python checks when it gets there, if at all. This changes how you read code —
+				a Rust type signature is a promise the compiler has already verified, not a
+				hopeful annotation.
+			</p>
+
+			<h3>Structs are dataclasses</h3>
+
+			<p>
+				A <code>struct</code> is a record with named, typed fields. This one describes
+				which approval prompts Codex is allowed to show you:
+			</p>
+
+			<figure class="code">
+				<figcaption><span>codex-rs/protocol/src/protocol.rs</span><span class="lines">GranularApprovalConfig, abridged</span></figcaption>
+				<pre><code class="language-rust">pub struct GranularApprovalConfig {
+    /// Whether to allow shell command approval requests …
+    pub sandbox_approval: bool,
+    /// Whether to allow prompts triggered by execpolicy `prompt` rules.
+    pub rules: bool,
+    /// Whether to allow approval prompts triggered by skill script execution.
+    pub skill_approval: bool,
+    /// Whether to allow MCP elicitation prompts.
+    pub mcp_elicitations: bool,
+}</code></pre>
+			</figure>
+
+			<p>The Python you already know:</p>
+
+			<figure class="code">
+				<figcaption><span class="lines">the same idea in Python</span></figcaption>
+				<pre><code class="language-python">@dataclass
+class GranularApprovalConfig:
+    sandbox_approval: bool
+    rules: bool
+    skill_approval: bool
+    mcp_elicitations: bool</code></pre>
+			</figure>
+
+			<p>
+				Two differences matter. <code>pub</code> means "visible outside this module" —
+				without it, a field is private, and privacy is the default. And there is no
+				<code>self</code>: methods live in a separate <code>impl</code> block, which we
+				meet shortly.
+			</p>
+
+			<h3>Enums are the good part</h3>
+
+			<p>
+				This is where Rust departs sharply from Python, and it is the construct you
+				will meet most often in this codebase. A Rust <code>enum</code> is a
+				<em>choice between alternatives, where each alternative can carry its own
+				data.</em> Here is the real security decision Codex makes before running
+				anything:
+			</p>
+
+			<figure class="code">
+				<figcaption><span>codex-rs/core/src/safety.rs</span><span class="lines">the SafetyCheck enum</span></figcaption>
+				<pre><code class="language-rust">#[derive(Debug, PartialEq)]
+pub enum SafetyCheck {
+    AutoApprove {
+        sandbox_type: SandboxType,
+        user_explicitly_approved: bool,
+    },
+    AskUser,
+    Reject {
+        reason: String,
+    },
+}</code></pre>
+			</figure>
+
+			<p>
+				A <code>SafetyCheck</code> is exactly one of three things. If it is
+				<code>AutoApprove</code> it carries which sandbox to use and whether you
+				approved explicitly. If it is <code>Reject</code> it carries a reason string.
+				If it is <code>AskUser</code> it carries nothing, because nothing else is
+				needed.
+			</p>
+
+			<aside class="concept" data-kind="rust">
+				<p class="concept-label">Rust · Why this beats the Python version</p>
+				<p>
+					In Python you would probably return a dict — <code>{"decision":
+					"reject", "reason": "..."}</code> — or a tuple, or three classes with a
+					common base. All of them share a flaw: nothing stops you reading
+					<code>reason</code> on an approval, or forgetting that "ask" is a
+					possibility. With a Rust enum, the <code>reason</code> field
+					<em>does not exist</em> unless the value is a <code>Reject</code>, and the
+					compiler will not let you ignore a case. Making illegal states
+					unrepresentable is the whole game, and it is why this codebase has so
+					many enums.
+				</p>
+			</aside>
+
+			<h3><code>match</code>: the exhaustive switch</h3>
+
+			<p>
+				You read an enum by <code>match</code>ing on it. This is Python's
+				<code>match</code> statement, except the compiler <em>counts the cases</em>
+				and errors if you missed one:
+			</p>
+
+			<figure class="code">
+				<figcaption><span>codex-rs/core/src/safety.rs</span><span class="lines">assess_patch_safety, opening</span></figcaption>
+				<pre><code class="language-rust">match policy {
+    AskForApproval::Never
+    | AskForApproval::OnRequest
+    | AskForApproval::Granular(_) =&gt; {
+        // Continue to see if this can be auto-approved.
+    }
+    AskForApproval::UnlessTrusted =&gt; {
+        return SafetyCheck::AskUser;
+    }
+}</code></pre>
+			</figure>
+
+			<p>
+				The <code>|</code> groups several variants into one arm. The <code>_</code>
+				inside <code>Granular(_)</code> means "it carries something; I don't care
+				what." Now recall the rule from <code>AGENTS.md</code> in Module&nbsp;1: <em>"When
+				possible, make <code>match</code> statements exhaustive and avoid wildcard
+				arms."</em> That rule is a safety mechanism. If someone adds a fifth approval
+				mode tomorrow, every exhaustive <code>match</code> in the codebase stops
+				compiling until a human decides what the new mode should do. A wildcard
+				<code>_ =&gt; {}</code> arm would silently swallow it — and in a file called
+				<code>safety.rs</code>, silently defaulting is how you get a security bug.
+			</p>
+
+			<h3>Attributes and <code>derive</code></h3>
+
+			<p>
+				That <code>#[derive(Debug, PartialEq)]</code> line above the enum asks the
+				compiler to write boilerplate for you: <code>Debug</code> generates a
+				printable representation (like <code>__repr__</code>), <code>PartialEq</code>
+				generates <code>==</code> (like <code>__eq__</code>). Real types in this
+				codebase stack them up:
+			</p>
+
+			<figure class="code">
+				<figcaption><span>codex-rs/protocol/src/protocol.rs</span><span class="lines">AskForApproval, abridged</span></figcaption>
+				<pre><code class="language-rust">#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash,
+         Serialize, Deserialize, Display, JsonSchema, TS)]
+#[serde(rename_all = "kebab-case")]
+pub enum AskForApproval {
+    /// Only "known safe" commands that **only read files** are auto-approved.
+    #[serde(rename = "untrusted")]
+    UnlessTrusted,
+
+    /// The model decides when to ask the user for approval.
+    #[serde(alias = "on-failure")]
+    #[default]
+    OnRequest,
+
+    /// Fine-grained controls for individual approval flows.
+    Granular(GranularApprovalConfig),
+
+    /// Never ask the user to approve commands.
+    Never,
+}</code></pre>
+			</figure>
+
+			<p>
+				Read that derive list as a list of capabilities this type gains for free.
+				<code>Serialize</code>/<code>Deserialize</code> come from
+				<code>serde</code> and mean the type converts to and from JSON — with
+				<code>rename_all = "kebab-case"</code>, the variant <code>UnlessTrusted</code>
+				would be <code>"unless-trusted"</code> on the wire, except
+				<code>#[serde(rename = "untrusted")]</code> overrides it for that one variant.
+				<code>JsonSchema</code> generates a JSON Schema (that's how
+				<code>config.schema.json</code> gets written), and <code>TS</code> generates
+				TypeScript type definitions — which is how the TypeScript SDK in Module&nbsp;10
+				stays in sync with the Rust for free.
+			</p>
+
+			<div class="callout note">
+				<span class="callout-label">Note</span>
+				<p>
+					<code>#[serde(alias = "on-failure")]</code> is backwards compatibility
+					fossilised in a line: this mode used to be called <code>on-failure</code>,
+					and old config files still say so. Reading a codebase well means noticing
+					this kind of thing — a rename that couldn't be a rename.
+				</p>
+			</div>
+		</section>
+
+		<section class="lesson-section" id="ownership" data-minutes="10">
+			<h2>Ownership and borrowing</h2>
+
+			<p>
+				This is the one genuinely new idea, and the reason Rust exists. The good news
+				for a reader: you mostly need to recognise three symbols, not to reason like
+				a compiler.
+			</p>
+
+			<p>
+				In Python, every variable is a reference to an object, and a garbage collector
+				frees objects once nothing points at them. Rust has no garbage collector.
+				Instead, every value has exactly one <strong>owner</strong>, and when the owner
+				goes out of scope the value is freed. That would be unbearably restrictive on
+				its own, so you can <strong>borrow</strong> a value instead of taking ownership
+				— that's what <code>&amp;</code> means.
+			</p>
+
+			<figure class="code">
+				<figcaption><span>codex-rs/core/src/safety.rs</span><span class="lines">the signature, reformatted</span></figcaption>
+				<pre><code class="language-rust">pub fn assess_patch_safety(
+    action: &amp;ApplyPatchAction,
+    policy: AskForApproval,
+    permission_profile: &amp;PermissionProfile,
+    file_system_sandbox_policy: &amp;FileSystemSandboxPolicy,
+    cwd: &amp;PathUri,
+    windows_sandbox_level: WindowsSandboxLevel,
+) -&gt; SafetyCheck {</code></pre>
+			</figure>
+
+			<p>Read that signature as a set of promises:</p>
+
+			<div class="table-wrap">
+				<table>
+					<thead>
+						<tr><th>Syntax</th><th>Means</th><th>Python intuition</th></tr>
+					</thead>
+					<tbody>
+						<tr><td><code>&amp;T</code></td><td>Borrowed, read-only. The caller keeps ownership; this function may look but not modify.</td><td>Passing an object you promise to treat as immutable</td></tr>
+						<tr><td><code>&amp;mut T</code></td><td>Borrowed, exclusive. May modify; nobody else may touch it meanwhile.</td><td>Passing a list you intend to mutate</td></tr>
+						<tr><td><code>T</code></td><td>Owned, moved in. The caller gives it up entirely.</td><td>Handing over the only copy</td></tr>
+					</tbody>
+				</table>
+			</div>
+
+			<p>
+				So <code>assess_patch_safety</code> borrows the patch, the profile, the policy
+				and the directory — it will read them and give them back untouched — while
+				<code>policy</code> and <code>windows_sandbox_level</code> are passed by value
+				because they are small <code>Copy</code> types (remember
+				<code>#[derive(..., Copy, ...)]</code> on <code>AskForApproval</code>), so
+				copying is cheaper than referencing.
+			</p>
+
+			<aside class="concept" data-kind="rust">
+				<p class="concept-label">Rust · The rule that buys everything</p>
+				<p>
+					At any moment a value may have <em>either</em> any number of
+					<code>&amp;</code> readers <em>or</em> exactly one <code>&amp;mut</code>
+					writer — never both. That single rule, checked at compile time, is why Rust
+					has no data races and no use-after-free. It's also why the compiler
+					sometimes rejects programs that would have been fine; that frustration is a
+					writer's problem, not a reader's. As a reader, just note who is allowed to
+					mutate what.
+				</p>
+			</aside>
+
+			<h3><code>String</code> vs <code>&amp;str</code></h3>
+
+			<p>
+				You will see both constantly. A <code>String</code> is an owned, growable
+				string — Python's <code>str</code>, roughly. A <code>&amp;str</code> is a
+				borrowed <em>view</em> into someone else's string data. And
+				<code>&amp;'static str</code> means a view that lives for the whole program —
+				in practice, a literal baked into the binary:
+			</p>
+
+			<figure class="code">
+				<figcaption><span>codex-rs/core/src/safety.rs</span><span class="lines">lines 15–18</span></figcaption>
+				<pre><code class="language-rust">const PATCH_REJECTED_OUTSIDE_PROJECT_REASON: &amp;str =
+    "writing outside of the project; rejected by user approval settings";
+const PATCH_REJECTED_READ_ONLY_REASON: &amp;str =
+    "writing is blocked by read-only sandbox; rejected by user approval settings";</code></pre>
+			</figure>
+
+			<p>
+				And when such a view has to become an owned value — because
+				<code>SafetyCheck::Reject</code> holds a <code>String</code>, not a borrow —
+				you'll see <code>.to_string()</code> doing the copy:
+			</p>
+
+			<figure class="code">
+				<figcaption><span>codex-rs/core/src/safety.rs</span><span class="lines">a Reject arm</span></figcaption>
+				<pre><code class="language-rust">SafetyCheck::Reject {
+    reason: "empty patch".to_string(),
+}</code></pre>
+			</figure>
+
+			<aside class="concept" data-kind="rust">
+				<p class="concept-label">Rust · <code>Arc&lt;T&gt;</code>, when one owner isn't enough</p>
+				<p>
+					Sometimes several parts of the program genuinely need to share one value —
+					the config, say, or a connection to the model. <code>Arc&lt;T&gt;</code>
+					("atomically reference counted") is the escape hatch: it wraps a value and
+					counts how many holders exist, freeing it when the count hits zero. This is
+					precisely how every Python object works, so when you see
+					<code>Arc&lt;Config&gt;</code>, read it as "a normal Python object
+					reference" and move on. The <code>A</code> means the counting is
+					thread-safe, which matters because Codex is heavily concurrent.
+				</p>
+			</aside>
+
+			<div class="callout deeper">
+				<span class="callout-label">Go deeper (optional)</span>
+				<p>
+					Lifetimes — the <code>'a</code> in <code>TimeFuture&lt;'a&gt;</code> —
+					are the compiler's way of proving a borrow doesn't outlive the thing it
+					borrows from. You will see them in signatures throughout this codebase. For
+					reading purposes you can treat <code>'a</code> as noise and
+					<code>'static</code> as "lives forever". Nothing in this course depends on
+					understanding them further.
+				</p>
+			</div>
+		</section>
+
+		<section class="lesson-section" id="result-option" data-minutes="9">
+			<h2>Result, Option, and the ? operator</h2>
+
+			<p>
+				Rust has no exceptions. A function that can fail says so in its return type,
+				and the caller cannot accidentally ignore it. Two enums carry the whole story
+				— and now that you've read the last two sections, you can see they're just
+				ordinary enums:
+			</p>
+
+			<figure class="code">
+				<figcaption><span class="lines">from the standard library</span></figcaption>
+				<pre><code class="language-rust">enum Option&lt;T&gt; {
+    Some(T),
+    None,
+}
+
+enum Result&lt;T, E&gt; {
+    Ok(T),
+    Err(E),
+}</code></pre>
+			</figure>
+
+			<p>
+				<code>Option&lt;T&gt;</code> is "a <code>T</code>, or nothing" — Python's
+				<code>T | None</code>, except you cannot forget to check.
+				<code>Result&lt;T, E&gt;</code> is "a <code>T</code>, or an error
+				<code>E</code>" — the return value of anything that can fail.
+			</p>
+
+			<h3>The <code>?</code> operator</h3>
+
+			<p>
+				Checking every <code>Result</code> by hand would be miserable, so Rust has one
+				character for it. Recall <code>main</code> from Module&nbsp;1:
+			</p>
+
+			<figure class="code">
+				<figcaption><span>codex-rs/cli/src/main.rs</span><span class="lines">lines 958–964</span></figcaption>
+				<pre><code class="language-rust">fn main() -&gt; anyhow::Result&lt;()&gt; {
+    let remote_control_disabled = codex_app_server::take_remote_control_disabled_env();
+    arg0_dispatch_or_else(move |arg0_paths: Arg0DispatchPaths| async move {
+        cli_main(arg0_paths, remote_control_disabled).await?;
+        Ok(())
+    })
+}</code></pre>
+			</figure>
+
+			<p>
+				<code>cli_main(...).await?</code> means: run it, and if it returned
+				<code>Err(e)</code>, <strong>return that error from the enclosing function
+				immediately</strong>; otherwise unwrap the <code>Ok</code> value and carry on.
+				It is Python's <code>raise</code>-propagation, made explicit at every call
+				site.
+			</p>
+
+			<aside class="concept" data-kind="rust">
+				<p class="concept-label">Rust · Why <code>?</code> is better than invisible exceptions</p>
+				<p>
+					In Python, any line can raise, and you find out by reading documentation or
+					by crashing in production. In Rust, a line that can fail is <em>visibly
+					marked</em>. Scanning a function for <code>?</code> tells you exactly where
+					it can bail out. The flip side: a function with no <code>?</code> and no
+					<code>Result</code> in its signature genuinely cannot fail, and you can stop
+					worrying about it. That's information Python never gives you.
+				</p>
+			</aside>
+
+			<p>
+				The <code>Ok(())</code> at the end is idiomatic: <code>()</code> is the unit
+				type, Rust's <code>None</code>-as-a-return-value, so <code>Ok(())</code> reads
+				"succeeded, no value to report".
+			</p>
+
+			<h3>The other ways you'll see them handled</h3>
+
+			<div class="table-wrap">
+				<table>
+					<thead>
+						<tr><th>Pattern</th><th>Meaning</th></tr>
+					</thead>
+					<tbody>
+						<tr><td><code>x?</code></td><td>Propagate the error to my caller</td></tr>
+						<tr><td><code>match x { Ok(v) =&gt; …, Err(e) =&gt; … }</code></td><td>Handle both cases explicitly</td></tr>
+						<tr><td><code>if let Some(v) = x { … }</code></td><td>Do something only if there's a value</td></tr>
+						<tr><td><code>let Ok(v) = x else { return … };</code></td><td>Bail out early on failure, keep the happy path unindented</td></tr>
+						<tr><td><code>x.unwrap_or_default()</code></td><td>Use the type's default instead of failing</td></tr>
+						<tr><td><code>x.ok_or_else(|| err)</code></td><td>Turn a missing <code>Option</code> into a <code>Result</code> error</td></tr>
+						<tr><td><code>x.unwrap()</code></td><td>"I promise this succeeded" — panics if wrong. Allowed in tests only</td></tr>
+					</tbody>
+				</table>
+			</div>
+
+			<p>
+				That <code>let … else</code> form appears in <code>safety.rs</code>, and it is
+				worth recognising because it reads backwards at first:
+			</p>
+
+			<figure class="code">
+				<figcaption><span>codex-rs/core/src/safety.rs</span><span class="lines">inside is_write_patch_constrained_to_writable_paths</span></figcaption>
+				<pre><code class="language-rust">let Ok(native_cwd) = cwd.to_abs_path() else {
+    return false;
+};</code></pre>
+			</figure>
+
+			<p>
+				"Bind <code>native_cwd</code> from the <code>Ok</code>; if it wasn't
+				<code>Ok</code>, run the <code>else</code> block, which must leave the
+				function." Note the security posture: if the current directory can't be
+				resolved, the answer is <code>false</code> — <em>not</em> writable, <em>not</em>
+				safe. Failing closed, in a file where failing open would be a vulnerability.
+			</p>
+
+			<p>
+				Finally, <code>anyhow::Result&lt;()&gt;</code> in that <code>main</code>
+				signature: <code>anyhow</code> is a library providing a catch-all error type,
+				so application code can propagate any error with <code>?</code> without
+				defining error enums for everything. When you see <code>anyhow</code>, read
+				"generic error, details in the message".
+			</p>
+		</section>
+
+		<section class="lesson-section" id="traits" data-minutes="9">
+			<h2>Traits and generics</h2>
+
+			<p>
+				A <strong>trait</strong> is a set of method signatures a type can promise to
+				provide. If you know Python's <code>Protocol</code> or abstract base classes,
+				you already have the idea. Here is one small enough to read whole — the
+				boundary Codex uses to ask "what time is it?":
+			</p>
+
+			<figure class="code">
+				<figcaption><span>codex-rs/core/src/current_time.rs</span><span class="lines">the trait</span></figcaption>
+				<pre><code class="language-rust">/// Host integration boundary for reading and waiting on the current time.
+pub trait TimeProvider: Send + Sync {
+    fn current_time(&amp;self, thread_id: ThreadId) -&gt; TimeFuture&lt;'_&gt;;
+
+    /// Waits for the given duration on this provider's clock.
+    ///
+    /// Dropping the returned future cancels the wait.
+    fn sleep(&amp;self, thread_id: ThreadId, duration: Duration) -&gt; SleepFuture&lt;'_&gt;;
+}</code></pre>
+			</figure>
+
+			<p>
+				Any type that provides <code>current_time</code> and <code>sleep</code> can be
+				a <code>TimeProvider</code>. The <code>: Send + Sync</code> after the name adds
+				two more requirements — those are themselves traits, meaning "safe to move
+				between threads" and "safe to share between threads". You will see
+				<code>Send + Sync</code> everywhere in this codebase; read it as "usable from
+				Codex's many concurrent tasks".
+			</p>
+
+			<p>
+				Implementing a trait is a separate block, which is the biggest structural
+				difference from Python classes:
+			</p>
+
+			<figure class="code">
+				<figcaption><span>codex-rs/core/src/current_time.rs</span><span class="lines">the real implementation</span></figcaption>
+				<pre><code class="language-rust">pub(crate) struct SystemTimeProvider;
+
+impl TimeProvider for SystemTimeProvider {
+    fn current_time(&amp;self, _thread_id: ThreadId) -&gt; TimeFuture&lt;'_&gt; {
+        Box::pin(async { Ok(Utc::now()) })
+    }
+
+    fn sleep(&amp;self, _thread_id: ThreadId, duration: Duration) -&gt; SleepFuture&lt;'_&gt; {
+        Box::pin(async move {
+            tokio::time::sleep(duration).await;
+            Ok(())
+        })
+    }
+}</code></pre>
+			</figure>
+
+			<p>
+				Three things to collect. <code>struct SystemTimeProvider;</code> with no fields
+				is a type that exists purely to have methods hung on it. The leading underscore
+				in <code>_thread_id</code> tells the compiler "I know I'm not using this
+				parameter, don't warn me" — the real system clock doesn't care which thread is
+				asking, but the trait requires the parameter because <em>other</em>
+				implementations will. And <code>pub(crate)</code> means public within this
+				crate only.
+			</p>
+
+			<h3>Why bother? Because it makes time fake-able</h3>
+
+			<figure class="code">
+				<figcaption><span>codex-rs/core/src/current_time.rs</span><span class="lines">resolve_time_provider</span></figcaption>
+				<pre><code class="language-rust">pub(crate) fn resolve_time_provider(
+    config: Option&lt;&amp;CurrentTimeReminderConfig&gt;,
+    external_provider: Option&lt;Arc&lt;dyn TimeProvider&gt;&gt;,
+) -&gt; Result&lt;Arc&lt;dyn TimeProvider&gt;&gt; {
+    match config.map(|config| config.clock_source).unwrap_or_default() {
+        CurrentTimeSource::System =&gt; Ok(Arc::new(SystemTimeProvider)),
+        CurrentTimeSource::External =&gt; external_provider.ok_or_else(|| {
+            anyhow!("… clock_source is external, but no external provider is available")
+        }),
+    }
+}</code></pre>
+			</figure>
+
+			<p>
+				You can now read this line by line, and it uses everything from this module.
+				<code>Arc&lt;dyn TimeProvider&gt;</code> is the key phrase: <code>dyn
+				Trait</code> means "some type implementing this trait, decided at runtime" —
+				which is what every Python object reference is. <code>config.map(...)</code>
+				applies a function only if the <code>Option</code> has a value;
+				<code>.unwrap_or_default()</code> supplies the default otherwise. The
+				<code>match</code> is exhaustive over the two clock sources.
+				<code>.ok_or_else(...)</code> converts "no external provider was supplied" from
+				a <code>None</code> into a <code>Result</code> error with a helpful message.
+			</p>
+
+			<aside class="concept" data-kind="eng">
+				<p class="concept-label">Engineering · Why an interface for the clock?</p>
+				<p>
+					Because a test that calls the real clock is a test that is slow and
+					flaky. With <code>TimeProvider</code> behind a trait, a test injects a fake
+					that jumps forward an hour instantly. This is dependency injection, and you
+					will see the same pattern for the model client, the filesystem, and the
+					sandbox — every boundary where Codex touches the outside world is a trait,
+					precisely so it can be faked. When you meet an unfamiliar trait in this
+					codebase, "what does this let them fake in tests?" is usually the right
+					question.
+				</p>
+			</aside>
+
+			<details class="digression">
+				<summary>Generics: <code>&lt;T&gt;</code> and where it differs from Python</summary>
+				<div class="digression-body">
+					<p>
+						<code>Option&lt;T&gt;</code> and <code>Result&lt;T, E&gt;</code> are
+						generic: <code>T</code> is a placeholder for a type filled in at each use
+						site. Python has the same notation in type hints
+						(<code>Optional[str]</code>), but there it is documentation the runtime
+						ignores. In Rust the compiler generates a separate specialised copy of
+						the code for each concrete <code>T</code>, so generics cost nothing at
+						runtime. That's why the codebase uses them freely.
+					</p>
+					<p>
+						The trade-off is against <code>dyn Trait</code>: generics are resolved at
+						compile time and are faster; <code>dyn</code> is resolved at runtime and
+						is more flexible. <code>Arc&lt;dyn TimeProvider&gt;</code> uses
+						<code>dyn</code> because the choice genuinely isn't known until the
+						config is read.
+					</p>
+				</div>
+			</details>
+		</section>
+
+		<section class="lesson-section" id="async" data-minutes="10">
+			<h2>async, tokio, and channels</h2>
+
+			<p>
+				Codex spends most of its life waiting — for the network, for a subprocess, for
+				you. Async is how it waits for many things at once without a thread for each.
+				If you've used Python's <code>asyncio</code>, this will feel familiar; the
+				shapes are nearly identical.
+			</p>
+
+			<div class="table-wrap">
+				<table>
+					<thead>
+						<tr><th>Rust</th><th>Python</th><th>Meaning</th></tr>
+					</thead>
+					<tbody>
+						<tr><td><code>async fn f()</code></td><td><code>async def f()</code></td><td>Calling it produces work, doesn't run it</td></tr>
+						<tr><td><code>f().await</code></td><td><code>await f()</code></td><td>Run it; yield to other tasks while waiting</td></tr>
+						<tr><td><code>Future&lt;Output = T&gt;</code></td><td>coroutine / awaitable</td><td>Work that will eventually produce a <code>T</code></td></tr>
+						<tr><td><code>tokio::spawn(f())</code></td><td><code>asyncio.create_task(f())</code></td><td>Run concurrently, don't wait</td></tr>
+						<tr><td>the Tokio runtime</td><td>the asyncio event loop</td><td>The scheduler that drives it all</td></tr>
+					</tbody>
+				</table>
+			</div>
+
+			<p>
+				One real difference matters for reading. In Python a coroutine starts running
+				as soon as you <code>await</code> it and the event loop is implicit and global.
+				In Rust a <code>Future</code> is <strong>completely inert</strong> until
+				something polls it, and the runtime is an ordinary library you construct
+				yourself. That's why Module&nbsp;1's <code>arg0_dispatch_or_else</code> had to
+				"construct a Tokio multi-thread runtime" as an explicit step — there is no
+				runtime unless someone builds one.
+			</p>
+
+			<aside class="concept" data-kind="rust">
+				<p class="concept-label">Rust · What <code>async move</code> means</p>
+				<p>
+					<code>async { ... }</code> creates a future from a block.
+					<code>move</code> tells the closure to <em>take ownership</em> of the
+					variables it mentions, rather than borrowing them. It's required here
+					because the future will outlive the function that created it — it gets
+					handed to the runtime and run later, by which time the original scope is
+					gone. When you see <code>async move</code>, read "package this work up,
+					taking everything it needs with it."
+				</p>
+			</aside>
+
+			<p>
+				And <code>Box::pin</code>, from <code>SystemTimeProvider</code> above: a future
+				is a state machine whose size depends on its contents, so a trait method that
+				returns "some future" must put it behind a pointer.
+				<code>Pin&lt;Box&lt;dyn Future&lt;Output = Result&lt;…&gt;&gt; + Send&gt;&gt;</code>
+				is a mouthful that means exactly one thing — "a heap-allocated future, safe to
+				send between threads". Codex gives it an alias so it only has to be spelled
+				once:
+			</p>
+
+			<figure class="code">
+				<figcaption><span>codex-rs/core/src/current_time.rs</span><span class="lines">lines 15–16</span></figcaption>
+				<pre><code class="language-rust">pub type TimeFuture&lt;'a&gt; = Pin&lt;Box&lt;dyn Future&lt;Output = Result&lt;DateTime&lt;Utc&gt;&gt;&gt; + Send + 'a&gt;&gt;;
+pub type SleepFuture&lt;'a&gt; = Pin&lt;Box&lt;dyn Future&lt;Output = Result&lt;()&gt;&gt; + Send + 'a&gt;&gt;;</code></pre>
+			</figure>
+
+			<h3>Channels: how concurrent parts talk</h3>
+
+			<p>
+				Codex is built out of independent tasks that pass messages, not out of shared
+				mutable state. The tool for that is a <strong>channel</strong> — a queue with a
+				sending end and a receiving end:
+			</p>
+
+			<figure class="code">
+				<figcaption><span class="lines">the shape you'll meet throughout core/</span></figcaption>
+				<pre><code class="language-rust">let (tx, mut rx) = tokio::sync::mpsc::channel(64);
+
+tokio::spawn(async move {
+    tx.send(Event::TaskStarted).await.ok();
+});
+
+while let Some(event) = rx.recv().await {
+    // handle each event as it arrives
+}</code></pre>
+			</figure>
+
+			<p>
+				<code>mpsc</code> is "multi-producer, single-consumer": many senders, one
+				receiver. The <code>64</code> is the buffer size — if the receiver falls
+				behind, senders wait, which is backpressure for free. <code>while let
+				Some(event) = rx.recv().await</code> loops until the channel closes and
+				<code>recv</code> returns <code>None</code>. Python's closest equivalent is
+				<code>asyncio.Queue</code>.
+			</p>
+
+			<p>
+				This one pattern is the backbone of the whole system. Module&nbsp;4 shows that
+				Codex's core protocol is literally two queues — you submit operations on one
+				and receive events on the other — and Module&nbsp;5 shows the agent loop
+				draining them.
+			</p>
+
+			<h3>What you now know</h3>
+
+			<p>
+				Structs are dataclasses; enums are tagged choices that make illegal states
+				unrepresentable; <code>match</code> is exhaustive by policy;
+				<code>&amp;</code> borrows and bare types move; <code>Result</code> plus
+				<code>?</code> replaces exceptions with visible, checked failure; traits are
+				interfaces that exist so boundaries can be faked in tests; and async looks like
+				<code>asyncio</code> with an explicit runtime and inert futures.
+			</p>
+
+			<p>
+				That is the whole toolkit. Anything else you meet — a macro, a lifetime, an
+				exotic generic bound — will be explained in a concept box where it appears.
+				Next we spend a module doing nothing but following a single message through
+				the entire system, which turns this vocabulary into a map.
+			</p>
+		</section>
+	</article>
+	<script src="manifest.js"></script>
+	<script src="assets/vendor/highlight.min.js"></script>
+	<script src="assets/js/app.js" defer></script>
+</body>
+</html>

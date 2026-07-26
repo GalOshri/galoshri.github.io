@@ -1,0 +1,170 @@
+<!doctype html>
+<html lang="en">
+<head>
+	<meta charset="utf-8">
+	<meta name="viewport" content="width=device-width, initial-scale=1">
+	<title>The compatibility nightmare · pi · Codebase Academy</title>
+	<link rel="stylesheet" href="../assets/css/site.css">
+</head>
+<body>
+	<article class="lesson">
+		<h1>The compatibility nightmare</h1>
+		<p class="lede">
+			Twenty vendors claim to speak "the OpenAI API." None of them speak quite
+			the same one. This lesson is the most honest in the course: it shows what
+			engineering against the real world's marketing claims looks like — and
+			the pattern pi uses to keep the mess governable.
+		</p>
+
+		<h2>The dream and the reality</h2>
+		<p>
+			The dream: since Groq, DeepSeek, Together, xAI, Cerebras, OpenRouter and
+			friends all imitate OpenAI's chat-completions API, one adapter should
+			serve them all. The reality, discovered one bug report at a time: this
+			one rejects <code>max_completion_tokens</code> and wants the deprecated
+			<code>max_tokens</code>; that one doesn't know the <code>developer</code>
+			role; a third crashes on the <code>store</code> field; and <em>ten of
+			them invented mutually incompatible ways to switch on reasoning</em>.
+		</p>
+		<p>
+			pi's answer is a <strong>compat profile</strong> — a typed checklist of
+			every known deviation:
+		</p>
+		<figure class="code">
+			<figcaption><span>packages/ai/src/types.ts</span><span class="lines">OpenAICompletionsCompat, abridged (~20 of the flags)</span></figcaption>
+			<pre><code class="language-typescript">export interface OpenAICompletionsCompat {
+	/** Whether the provider supports the `store` field. */
+	supportsStore?: boolean;
+	/** Whether the provider supports the `developer` role (vs `system`). */
+	supportsDeveloperRole?: boolean;
+	/** Whether the provider supports `reasoning_effort`. */
+	supportsReasoningEffort?: boolean;
+	/** Which field to use for max tokens. */
+	maxTokensField?: "max_completion_tokens" | "max_tokens";
+	/** Whether thinking blocks must be converted to text blocks with &lt;thinking&gt; delimiters. */
+	requiresThinkingAsText?: boolean;
+	/** Format for reasoning/thinking parameter. */
+	thinkingFormat?:
+		| "openai"        // reasoning_effort: "high"
+		| "openrouter"    // reasoning: { effort }
+		| "deepseek"      // thinking: { type } + reasoning_effort
+		| "together"      // reasoning: { enabled }
+		| "zai"           // thinking: { type }
+		| "qwen"          // top-level enable_thinking: boolean
+		| "chat-template" // configurable chat_template_kwargs
+		| "qwen-chat-template"
+		| "string-thinking"
+		| "ant-ling";
+	/** Whether the provider supports the `strict` field in tool definitions. */
+	supportsStrictMode?: boolean;
+	/** Cache control convention for prompt caching. */
+	cacheControlFormat?: "anthropic";
+	// ...a dozen more
+}</code></pre>
+		</figure>
+		<p>
+			Pause on <code>thinkingFormat</code>. One conceptual feature — "think
+			harder" — expressed ten different ways in the wild. Every enum value is
+			a vendor's independent decision, faithfully catalogued with its wire
+			syntax in the doc comment. This interface is worth more than most API
+			documentation, because it's <em>tested</em> documentation: it compiles,
+			and requests built from it work.
+		</p>
+
+		<h2>Detection: sensible defaults from the URL</h2>
+		<p>
+			Nobody wants to fill twenty flags per model. So the adapter
+			<em>detects</em> a profile from what it already knows:
+		</p>
+		<figure class="code">
+			<figcaption><span>packages/ai/src/api/openai-completions.ts</span><span class="lines">detectCompat, abridged</span></figcaption>
+			<pre><code class="language-typescript">function detectCompat(model: Model&lt;"openai-completions"&gt;): ResolvedOpenAICompletionsCompat {
+	const isZai = provider === "zai" || baseUrl.includes("api.z.ai") || baseUrl.includes("open.bigmodel.cn");
+	const isTogether = provider === "together" || baseUrl.includes("api.together.ai");
+	const isMoonshot = provider === "moonshotai" || baseUrl.includes("api.moonshot.");
+	const isOpenRouter = provider === "openrouter" || baseUrl.includes("openrouter.ai");
+	const isNvidia = provider === "nvidia" || baseUrl.includes("integrate.api.nvidia.com");
+	// ...and DeepSeek, Grok, Cerebras, Cloudflare, chutes.ai, opencode ...
+
+	const isNonStandard = isNvidia || isTogether || isZai || isMoonshot /* || ... */;
+
+	return {
+		supportsStore: !isNonStandard,
+		supportsDeveloperRole: isOpenRouterDeveloperRoleModel || (!isNonStandard && !isOpenRouter),
+		maxTokensField: useMaxTokens ? "max_tokens" : "max_completion_tokens",
+		requiresReasoningContentOnAssistantMessages: isDeepSeek,
+		thinkingFormat: isDeepSeek ? "deepseek" : isZai ? "zai" : isTogether ? "together" : /* ... */ "openai",
+		supportsStrictMode: !isMoonshot && !isTogether && !isNvidia,
+		// ...
+	};
+}</code></pre>
+		</figure>
+		<p>
+			Then explicit overrides win: <code>getCompat</code> merges
+			<code>model.compat</code> (from the catalog, or from a user's custom
+			model entry) over the detected defaults. Detection for the 95% case,
+			declaration for the exceptions — and if a new vendor appears tomorrow,
+			a user can support it with a JSON snippet of flags, no code change.
+		</p>
+
+		<aside class="concept" data-kind="eng">
+			<p class="concept-label">Engineering · Compatibility profiles and feature detection</p>
+			<p>
+				This mess has a proud lineage: web browsers. Decades of "every
+				browser claims to support the standard, differently" produced the
+				same three-part answer you see here: a <strong>capability
+				checklist</strong> instead of if-else chains scattered through logic
+				(<code>if (compat.supportsStore)</code> reads and audits far better
+				than <code>if (provider !== "nvidia" && provider !== "together" && ...)</code>
+				repeated forty places); <strong>centralized detection</strong> so
+				knowledge about vendors lives in exactly one function; and
+				<strong>user-suppliable overrides</strong> as the escape hatch.
+			</p>
+			<p>
+				The meta-lesson: when you must depend on many implementations of one
+				"standard," don't model vendors — <em>model capabilities</em>.
+				Vendors multiply; capabilities converge to a few dozen booleans.
+				(pi even defines a second, smaller profile for Anthropic-compatible
+				resellers — the pattern recurs wherever a standard gets popular.)
+			</p>
+		</aside>
+
+		<h2>Where the flags bite</h2>
+		<p>
+			Scattered through the adapter's request builder, each flag has its
+			moment: the messages array uses role <code>developer</code> or
+			<code>system</code>; thinking blocks get serialized as structured
+			fields or wrapped in <code>&lt;thinking&gt;</code> text delimiters;
+			the reasoning knob is spelled per <code>thinkingFormat</code>; tool
+			schemas gain or lose <code>strict</code>. The <em>logic</em> stays
+			linear; the flags absorb the branching. And when a vendor fixes or
+			breaks something — the git log shows this weekly — the diff is one line
+			in <code>detectCompat</code> plus a regression test.
+		</p>
+
+		<div class="callout note">
+			<span class="callout-label">Note · why this lesson matters beyond pi</span>
+			<p>
+				Most tutorials show you the Anthropic adapter's world: one vendor,
+				clean spec. Most <em>careers</em> are spent in this lesson's world:
+				payment processors, SSO providers, cloud APIs, browser quirks. The
+				compat-profile pattern — checklist, detection, override — transfers
+				to all of them. This unglamorous file may be the most professionally
+				useful one in the course.
+			</p>
+		</div>
+
+		<h2>What you now know</h2>
+		<p>
+			"OpenAI-compatible" is a spectrum, and pi manages it with typed
+			capability profiles: auto-detected from URLs, overridable per model,
+			consulted at every request-building decision. Next, the layer that
+			assumes even a well-formed request can fail: retries and error
+			classification.
+		</p>
+	</article>
+	<script src="../manifest.js"></script>
+	<script src="../assets/vendor/highlight.min.js"></script>
+	<script src="../assets/js/app.js" defer></script>
+</body>
+</html>

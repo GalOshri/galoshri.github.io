@@ -1,0 +1,126 @@
+<!doctype html>
+<html lang="en">
+<head>
+	<meta charset="utf-8">
+	<meta name="viewport" content="width=device-width, initial-scale=1">
+	<title>Keyboard input, part 2: keys.ts · pi · Codebase Academy</title>
+	<link rel="stylesheet" href="../assets/css/site.css">
+</head>
+<body>
+	<article class="lesson">
+		<h1>Keyboard input, part 2: keys.ts</h1>
+		<p class="lede">
+			1,400 lines to answer "which key was pressed?" — because terminals
+			encode keys in three generations of incompatible schemes. Along the
+			way: the most dazzling type-level trick in the repository.
+		</p>
+
+		<h2>Why "which key?" is hard</h2>
+		<p>
+			The classic encoding is a fossil record. Printable keys arrive as
+			themselves. <kbd>ctrl+a</kbd> through <kbd>ctrl+z</kbd> arrive as
+			bytes 1–26 (that's why <kbd>ctrl+c</kbd> is byte 3, and why
+			<kbd>ctrl+i</kbd> is <em>literally indistinguishable</em> from Tab —
+			byte 9). Arrows and function keys are multi-byte escape sequences
+			that vary by terminal. And whole categories simply don't exist:
+			<kbd>ctrl+shift+p</kbd>, <kbd>super+k</kbd>, key <em>release</em>
+			events — the wire format has no way to say them. Three fixes stack
+			historically, and pi speaks all three:
+		</p>
+		<ul>
+			<li><strong>Legacy sequences</strong> — the fossil layer, always available.</li>
+			<li><strong>xterm modifyOtherKeys</strong> — an extension encoding modifiers numerically; the fallback.</li>
+			<li><strong>Kitty keyboard protocol</strong> — the modern scheme (negotiated at startup, last lesson): every key event as an unambiguous CSI sequence with full modifiers <em>and</em> a press/repeat/release flag. This is why <code>wantsKeyRelease</code> exists on Component — hold-to-preview UI needs releases, which only Kitty can deliver.</li>
+		</ul>
+		<p>
+			<code>parseKey</code>/<code>matchesKey</code> normalize all three into
+			one vocabulary, so components just write
+			<code>matchesKey(data, "ctrl+shift+p")</code>. And that string
+			argument is where TypeScript shows off.
+		</p>
+
+		<h2>The type that generates a keyboard</h2>
+		<figure class="code">
+			<figcaption><span>packages/tui/src/keys.ts</span><span class="lines">ModifiedKeyId, verbatim</span></figcaption>
+			<pre><code class="language-typescript">type BaseKey = Letter | Digit | SymbolKey | SpecialKey;
+type ModifierName = "ctrl" | "shift" | "alt" | "super";
+
+type ModifiedKeyId&lt;Key extends string, RemainingModifiers extends ModifierName = ModifierName&gt; = {
+	[M in RemainingModifiers]: `${M}+${Key}` | `${M}+${ModifiedKeyId&lt;Key, Exclude&lt;RemainingModifiers, M&gt;&gt;}`;
+}[RemainingModifiers];
+
+/**
+ * Union type of all valid key identifiers.
+ * Provides autocomplete and catches typos at compile time.
+ */
+export type KeyId = BaseKey | ModifiedKeyId&lt;BaseKey&gt;;</code></pre>
+		</figure>
+
+		<aside class="concept" data-kind="ts">
+			<p class="concept-label">TypeScript · Template-literal types</p>
+			<p>
+				TypeScript can compute with <em>string types</em>:
+				<code>`${M}+${Key}`</code> is a type meaning "the string M, a
+				plus, then Key" — and when M and Key are unions, the result is the
+				union of <em>every combination</em>. This four-liner reads as a
+				recursive comprehension: for each modifier M, produce
+				<code>"M+key"</code>, plus <code>"M+"</code> followed by any
+				combination of the <em>remaining</em> modifiers
+				(<code>Exclude</code> removes M, so <code>"ctrl+ctrl+c"</code>
+				can't exist). Expanded, <code>KeyId</code> is a union of every
+				valid combo — <code>"c"</code>, <code>"ctrl+c"</code>,
+				<code>"ctrl+shift+p"</code>, <code>"ctrl+alt+super+f9"</code> —
+				thousands of strings the compiler enumerates so your editor can
+				autocomplete them and <code>matchesKey(data, "ctlr+c")</code>
+				fails the build on the typo.
+			</p>
+			<p>
+				Python's type system has nothing in this territory —
+				<code>Literal</code> unions exist but can't be computed from each
+				other. It's the clearest case in the course of TypeScript acting
+				as a small proof engine over your string conventions. (Use
+				sparingly: types this clever cost compile time and reader
+				patience. Encoding a <em>closed, mechanical</em> grammar like key
+				combos is the legitimate use.)
+			</p>
+		</aside>
+
+		<h2>Keybindings: the indirection layer</h2>
+		<p>
+			One more floor sits above key identity:
+			<code>KeybindingsManager</code>. Components don't ask "was that
+			ctrl+z?"; they ask "was that the <em>undo</em> action?" — and a
+			user-editable JSON file maps actions to <code>KeyId</code>s
+			(remember AGENTS.md's rule from lesson 1.5: <em>never hardcode key
+			checks; add defaults to DEFAULT_EDITOR_KEYBINDINGS so they stay
+			configurable</em> — a law with an enforcement mechanism you've now
+			met). Identity → vocabulary → binding → action: four layers between a
+			byte and an undo, each testable alone.
+		</p>
+
+		<div class="callout note">
+			<span class="callout-label">Note · why 1,400 lines is the right size</span>
+			<p>
+				Almost none of it is clever; it's <em>coverage</em> — every legacy
+				sequence variant across terminal emulators, the full Kitty spec,
+				Windows quirks, and a wall of regression tests next door (recall
+				the TUI test directory's <code>bug-regression-*</code> files).
+				Input handling is like the compat matrix of lesson 4.3: the world
+				is inconsistent, so a complete map of it is bulky. The skill is
+				keeping the bulk <em>quarantined</em> behind a two-function API.
+			</p>
+		</div>
+
+		<h2>What you now know</h2>
+		<p>
+			Key handling = three stacked wire protocols normalized into one typed
+			vocabulary (generated by a recursive template-literal type), with a
+			user-remappable binding layer on top. Now we can finally read the
+			component that consumes most of these keys: the Editor.
+		</p>
+	</article>
+	<script src="../manifest.js"></script>
+	<script src="../assets/vendor/highlight.min.js"></script>
+	<script src="../assets/js/app.js" defer></script>
+</body>
+</html>
